@@ -98,6 +98,30 @@ struct TVContentView: View {
         return TVFixtureEntry.pinnedFirst(enriched(TVFixtureEntry.group(tabChannels)))
     }
 
+    /// Featured rail entries (redesign plan §2.0 — the featured
+    /// rail on Trực tiếp is one of the surfaces the redesign
+    /// leaves unchanged): the first fixtures of the Trực tiếp
+    /// tab, which the store fills with live matches only. Empty
+    /// on every other tab, so the rail — and the hero default
+    /// and focus keys it feeds — exists only there.
+    private var featuredEntries: [TVFixtureEntry] {
+        guard store.selectedLeague == PlaylistStore.liveTabValue else { return [] }
+        return Array(entries.prefix(10))
+    }
+
+    /// The one fixture the Manchester United pin puts first,
+    /// drawn from the whole loaded pool (allEntries — both
+    /// published lists, EN block excluded) rather than the
+    /// current tab's list: the pin is an app-level promise, so
+    /// the pre-resolve hook in body stays keyed on the same pin
+    /// whichever tab he is browsing, and browsing a tab whose
+    /// own list holds no MU fixture never cancels the priority
+    /// match's pre-resolve. Nil when no live or upcoming MU
+    /// fixture is loaded (TVFixtureEntry.manchesterUnitedPin).
+    private var muPinEntry: TVFixtureEntry? {
+        TVFixtureEntry.manchesterUnitedPin(in: allEntries)
+    }
+
     /// Attach each fixture's matched live state + competition
     /// identity (spec §1/§3): the store is the only reader of the
     /// state store; entries carry the result to the views.
