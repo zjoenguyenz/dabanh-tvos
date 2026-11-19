@@ -24,6 +24,9 @@ import SwiftUI
 /// 08:00 in Oklahoma). The old TV view pinned its formatter to
 /// Asia/Ho_Chi_Minh; v1.3.0 follows the device like the phone does.
 /// Live minutes come from the absolute instant and never shift.
+/// MainActor-isolated (Swift 6): DateFormatter is not Sendable, and
+/// every caller is a SwiftUI view on the main actor anyway.
+@MainActor
 enum TVKickoffFormat {
     static let time: DateFormatter = {
         let f = DateFormatter()
