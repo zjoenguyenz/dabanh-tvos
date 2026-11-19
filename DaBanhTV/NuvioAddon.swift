@@ -419,8 +419,13 @@ final class NuvioStore: ObservableObject {
 
     /// The refresh task-group id the fold reports under —
     /// not a catalog id, so the catalog switch below never
-    /// claims it.
-    private static let foldTaskID = "__nuvio_fold__"
+    /// claims it. `nonisolated` because the fold's task-group
+    /// child reads it off the main actor: a `static let`
+    /// inside an @MainActor type is still actor-isolated
+    /// without the marker, immutable String or not (CI run
+    /// #5's single error). The value is a compile-time
+    /// constant sentinel, so sharing it is safe.
+    private nonisolated static let foldTaskID = "__nuvio_fold__"
 
     /// Catalog TTL: inside it, a tab open costs no fetch.
     private static let catalogTTL: TimeInterval = 5 * 60
