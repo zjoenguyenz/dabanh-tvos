@@ -28,10 +28,12 @@ import SwiftUI
 ///   are filtered out of every fixture list and the featured rail.
 struct TVContentView: View {
     @EnvironmentObject private var store: PlaylistStore
-    /// The Nuvio addon's content for the BLV Anh tab (2026-11-19):
-    /// a store of its own, read ONLY by the EN section — the
-    /// fixture tabs never see it, so addon content cannot leak
-    /// into them.
+    /// The Nuvio addon's content (2026-11-19): a store of its
+    /// own, read by the EN section and — each for its own
+    /// league's slice only — by the folded league tabs (Tây
+    /// Ban Nha, Ý, Pháp, Đức; owner, 2026-11-19 12:58 CST).
+    /// The PlaylistStore fixture lists never see it, so addon
+    /// content cannot leak into them.
     @StateObject private var nuvio = NuvioStore()
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
@@ -121,6 +123,96 @@ struct TVContentView: View {
         return TVFixtureEntry.manchesterUnitedPin(in: TVFixtureEntry.group(pool))
     }
 
+    // MARK: - League tab addon content (owner, 2026-11-19 12:58 CST)
+
+    /// The league whose tab is selected AND which carries an
+    /// addon fold: Tây Ban Nha, Ý, Pháp and Đức — the four
+    /// leagues with entries in NuvioClient.leagueSearches.
+    /// Anh and Khác have no fold: for them foldLeague is nil,
+    /// every accessor below is empty, and their tabs render
+    /// exactly as they did before the folds existed.
+    private var foldLeague: League? {
+        guard let league = League(rawValue: store.selectedLeague) else { return nil }
+        switch league {
+        case .spain, .italy, .france, .germany: return league
+        case .england, .other: return nil
+        }
+    }
+
+    /// The selected fold league's addon channels: its league
+    /// fold's 24/7 set from the Nuvio store.
+    private var leagueAddonChannels: [NuvioItem] {
+        guard let league = foldLeague else { return [] }
+        return nuvio.leagueChannels[league.rawValue] ?? []
+    }
+
+    /// The selected fold league's addon fixtures: the store's
+    /// live / upcoming events whose headline the shared
+    /// classifier files under this league — the same rule the
+    /// mirror fixtures follow, so a live or hot match of the
+    /// league leads this tab whichever source carries it
+    /// (owner's grouping rule, 2026-11-19 12:59 CST).
+    /// Cross-border cup fixtures keep the first-checked-league
+    /// convention: Bayern vs Arsenal classifies Anh and stays
+    /// out of the Đức tab, exactly as it does in the mirror
+    /// lists.
+    private var leagueLiveEvents: [NuvioItem] {
+        guard let league = foldLeague else { return [] }
+        return nuvio.liveEvents.filter {
+            LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
+        }
+    }
+
+    private var leagueUpcomingEvents: [NuvioItem] {
+        guard let league = foldLeague else { return [] }
+        return nuvio.upcomingEvents.filter {
+            LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
+        }
+    }
+
+    /// True when the selected league tab has any addon
+    /// content to show.
+    private var hasLeagueAddon: Bool {
+        !leagueAddonChannels.isEmpty || !leagueLiveEvents.isEmpty || !leagueUpcomingEvents.isEmpty
+    }
+
+    /// The channel copy for a folded league, in the Đức
+    /// round's wording pattern: the channel rail's title and
+    /// subtitle, the card's play-line prefix and the hero's
+    /// channel line. Only ever called with a fold league; the
+    /// Anh / Khác arm exists so the switch is exhaustive, and
+    /// its text is never rendered.
+    private func leagueChannelCopy(_ league: League)
+        -> (railTitle: String, railSubtitle: String, cardPrefix: String, heroLine: String) {
+        switch league {
+        case .spain:
+            return ("📺  NUVIO · KÊNH GIẢI TÂY BAN NHA",
+                    "Kênh La Liga từ addon Nuvio — phát liên tục.",
+                    "Kênh giải Tây Ban Nha",
+                    "Kênh giải Tây Ban Nha · phát liên tục")
+        case .italy:
+            return ("📺  NUVIO · KÊNH GIẢI Ý",
+                    "Kênh Serie A từ addon Nuvio — phát liên tục.",
+                    "Kênh giải Ý",
+                    "Kênh giải Ý · phát liên tục")
+        case .france:
+            return ("📺  NUVIO · KÊNH GIẢI PHÁP",
+                    "Kênh Ligue 1 từ addon Nuvio — phát liên tục.",
+                    "Kênh giải Pháp",
+                    "Kênh giải Pháp · phát liên tục")
+        case .germany:
+            return ("📺  NUVIO · KÊNH GIẢI ĐỨC",
+                    "Kênh Bundesliga từ addon Nuvio — phát liên tục.",
+                    "Kênh giải Đức",
+                    "Kênh giải Đức · phát liên tục")
+        case .england, .other:
+            return ("📺  NUVIO · KÊNH 24/7",
+                    "Kênh từ addon Nuvio — phát liên tục.",
+                    "Kênh Nuvio",
+                    "Kênh Nuvio · phát liên tục")
+        }
+    }
+
     /// The English block, merged from both published lists and
     /// deduplicated by URL (in practice it lives in the main list).
     private var enChannels: [Channel] {
@@ -186,6 +278,7 @@ struct TVContentView: View {
         .onChange(of: nuvio.liveEvents) { _, _ in syncHero() }
         .onChange(of: nuvio.upcomingEvents) { _, _ in syncHero() }
         .onChange(of: nuvio.channels) { _, _ in syncHero() }
+        .onChange(of: nuvio.leagueChannels) { _, _ in syncHero() }
     }
 
     /// Focus key → hero content, for every focusable card on screen.
@@ -196,6 +289,9 @@ struct TVContentView: View {
         for ch in enChannels { map["en:" + ch.url] = .english(ch) }
         for item in nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels {
             map["nv:" + item.id] = .nuvio(item)
+        }
+        for items in nuvio.leagueChannels.values {
+            for item in items { map["nv:" + item.id] = .nuvio(item) }
         }
         return map
     }
@@ -213,6 +309,26 @@ struct TVContentView: View {
                 heroItem = .nuvio(first)
             } else {
                 heroItem = enChannels.first.map { .english($0) }
+            }
+            return
+        }
+        if foldLeague != nil {
+            // A folded league tab's hero follows its addon
+            // content too: a focused addon item keeps its
+            // hero, and the default is fixtures first, then
+            // the addon's live / upcoming fixtures of the
+            // league, then its channels — the tab's own rail
+            // order.
+            if case .nuvio(let item) = heroItem,
+               (leagueLiveEvents + leagueUpcomingEvents + leagueAddonChannels).contains(item) { return }
+            if case .fixture(let current) = heroItem,
+               entries.contains(where: { $0.id == current.id }) { return }
+            if let first = featuredEntries.first ?? entries.first {
+                heroItem = .fixture(first)
+            } else if let first = leagueLiveEvents.first ?? leagueUpcomingEvents.first ?? leagueAddonChannels.first {
+                heroItem = .nuvio(first)
+            } else {
+                heroItem = nil
             }
             return
         }
@@ -260,6 +376,12 @@ struct TVContentView: View {
         }
         if store.selectedLeague == PlaylistStore.hotTabValue {
             return "\(entries.count) trận hot"
+        }
+        if foldLeague != nil && hasLeagueAddon {
+            let matches = entries.count + leagueLiveEvents.count + leagueUpcomingEvents.count
+            return leagueAddonChannels.isEmpty
+                ? "\(matches) trận"
+                : "\(matches) trận · \(leagueAddonChannels.count) kênh"
         }
         return "\(entries.count) trận"
     }
@@ -374,9 +496,10 @@ struct TVContentView: View {
     private var scrollBody: some View {
         if isENTab {
             enBody
-        } else if entries.isEmpty && featuredEntries.isEmpty {
+        } else if entries.isEmpty && featuredEntries.isEmpty
+                    && !hasLeagueAddon {
             Spacer()
-            if store.isLoading {
+            if store.isLoading || (foldLeague != nil && nuvio.isLoading) {
                 ProgressView("Đang tải danh sách…")
                     .font(.title3)
                     .foregroundStyle(.white)
@@ -411,11 +534,20 @@ struct TVContentView: View {
                         if !live.isEmpty {
                             railSection("🔴  ĐANG ĐÁ", live)
                         }
+                        if !leagueLiveEvents.isEmpty {
+                            nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", leagueLiveEvents)
+                        }
                         if !upcoming.isEmpty {
                             railSection("⏰  SẮP ĐÁ", upcoming)
                         }
+                        if !leagueUpcomingEvents.isEmpty {
+                            nuvioEventRail("⏰  NUVIO · SẮP ĐÁ", leagueUpcomingEvents)
+                        }
                         if !rest.isEmpty {
                             railSection("📺  KHÁC", rest)
+                        }
+                        if let league = foldLeague, !leagueAddonChannels.isEmpty {
+                            leagueChannelRail(leagueAddonChannels, league: league)
                         }
                         footerRow
                     }
@@ -429,7 +561,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.3.9")
+            Text("Đá Banh TV v1.4.0")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -525,6 +657,38 @@ struct TVContentView: View {
                             playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
                         } label: {
                             NuvioChannelCard(item: item, focused: focusedKey == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focusedKey, equals: "nv:" + item.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+    }
+
+    /// A folded league tab's addon channel rail (owner,
+    /// 2026-11-19 12:58 CST): the league fold's 24/7 channels
+    /// below the tab's fixtures — the nuvioChannelRail shape,
+    /// with the league's own copy and the card's own play line.
+    private func leagueChannelRail(_ items: [NuvioItem], league: League) -> some View {
+        let copy = leagueChannelCopy(league)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(copy.railTitle)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            Text(copy.railSubtitle)
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(items) { item in
+                        Button {
+                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                        } label: {
+                            NuvioChannelCard(item: item, focused: focusedKey == "nv:" + item.id,
+                                             detailPrefix: copy.cardPrefix)
                         }
                         .tvCardButton()
                         .focused($focusedKey, equals: "nv:" + item.id)
@@ -659,9 +823,17 @@ struct TVContentView: View {
     private func nuvioHeroMeta(_ item: NuvioItem) -> String {
         var parts: [String] = []
         if let league = item.league { parts.append(league) }
-        parts.append(item.kind == .channel
-            ? "Kênh tiếng Anh · phát liên tục"
-            : "Trận đấu qua addon Nuvio")
+        if item.kind == .channel {
+            // A league-fold channel focused in its own league
+            // tab is that league's channel, not an English one.
+            if let league = foldLeague, leagueAddonChannels.contains(item) {
+                parts.append(leagueChannelCopy(league).heroLine)
+            } else {
+                parts.append("Kênh tiếng Anh · phát liên tục")
+            }
+        } else {
+            parts.append("Trận đấu qua addon Nuvio")
+        }
         return parts.joined(separator: "  ·  ")
     }
 

@@ -37,7 +37,7 @@ final class PlaylistStore: ObservableObject {
     /// group-title the mirror's scraper gives its hot rail.
     static let hotGroupName = "🔥 Hot"
     /// selectedLeague value meaning "the Hot tab" (league rawValues
-    /// are 1, 2, 3, 4 and 9, so 0 is free).
+    /// are 1, 2, 3, 4, 5 and 9, so 0 is free).
     static let hotTabValue = 0
     /// selectedLeague value meaning "the Trực tiếp (live) tab" — every
     /// match in its live window right now, across all leagues and the

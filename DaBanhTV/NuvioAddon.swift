@@ -12,12 +12,25 @@ import SwiftUI
 /// its 24/7 channels render first, in this screen's existing
 /// rail/card idiom, and the old EN block stays BELOW them as the
 /// fallback, so the tab never goes empty when the addon is down.
-/// Nothing addon-sourced appears anywhere else: the store below
-/// is a separate object the fixture tabs never read, and the
-/// ladder channels it builds carry the EN group name, so the
-/// existing English exclusion (TVEnglish / LeagueClassifier)
-/// treats them as English-block content wherever they could
-/// ever surface.
+/// The store below is a separate object the fixture tabs never
+/// read, and the ladder channels it builds carry the EN group
+/// name, so the existing English exclusion (TVEnglish /
+/// LeagueClassifier) treats them as English-block content
+/// wherever they could ever surface.
+///
+/// One owner-ordered exception to "nothing addon-sourced
+/// appears anywhere else" (2026-11-19 12:58 CST): a league tab
+/// also carries ITS league's addon content. A folded league
+/// tab shows the fixtures the store already holds (its live /
+/// upcoming events whose headline classifies under that
+/// league by the same LeagueClassifier the mirror fixtures
+/// use) at the top of the tab, and the league's 24/7 channels
+/// — folded from the Networks search index exactly like the
+/// BLV Anh channel fold — in a channel rail below the
+/// fixtures. The mechanism is general
+/// (NuvioClient.leagueSearches, keyed by league rank);
+/// 1.4.0 wires the four folded leagues: Tây Ban Nha, Ý, Pháp
+/// and Đức. Anh and Khác carry no fold.
 ///
 /// The addon speaks the Stremio shapes the hunt verified
 /// (tv-build/sports-provider-hunt-20261117/HUNT-REPORT.md +
@@ -255,6 +268,49 @@ private enum NuvioClient {
     /// than the fetches it rides with.
     private static let foldDeadline: TimeInterval = 25
 
+    /// Per-league channel searches for the league tabs
+    /// (owner, 2026-11-19 12:58 CST: a league's addon channels
+    /// belong in that league's tab), keyed by League rawValue.
+    /// Each query is one unpaged Networks search, folded with
+    /// the same discipline as the family fold above. Every
+    /// query below was probed live 2026-11-19 (this VM) and
+    /// returns exactly its league's channel set — every meta
+    /// releaseInfo "24/7", no duplicates, no other league's
+    /// channels:
+    /// - Tây Ban Nha: "La Liga" → 15 (DAZN LaLiga, Movistar
+    ///   LaLiga, LaLiga TV, LaLiga SmartBank TV, SuperSport
+    ///   LaLiga, beIN Sports La Liga, DAZN Laliga 1/2, La Liga
+    ///   TV Bar, Laliga TV Hypermotion (base, 2, 3), M+
+    ///   Laliga, Movistar La Liga 1/2). SmartBank TV and the
+    ///   Hypermotion set are the Segunda tier's league-branded
+    ///   channels — in scope under the same "the country's
+    ///   football, top-flight-led" convention as Đức's
+    ///   2. Bundesliga names.
+    /// - Ý: "Sky Calcio" → 5 (Sky Sports Calcio, Sky Calcio
+    ///   1–4) and "Sky Sports Serie A" → exactly 1 more (the
+    ///   channel of that name), 6 in all. The bare "Serie A"
+    ///   query is deliberately NOT used: it returns 34 metas,
+    ///   33 of them TV-series channels (Sky Serie, beIN
+    ///   Series, TNT Serie …) — all "24/7" too, so the fold's
+    ///   field rule could not keep them out of the Ý tab.
+    /// - Pháp: "Ligue 1" → 19 (DAZN Ligue 1, Canal+ Ligue 1,
+    ///   DAZN Ligue 1 Live 1–9, Ligue 1+ ×7, Psg Ligue 1) and
+    ///   "Leauge 1" → exactly 2: DAZN 2/3 Leauge 1, the
+    ///   source's own misspelling on DAZN France's overflow
+    ///   channels — unambiguously Ligue 1 channels, so they
+    ///   fold, as they do on iOS.
+    /// - Đức: "Sky Sport Bundesliga" → 11 (Sky Sports
+    ///   Bundesliga + 1–10). (The broader "Sky Bundesliga" /
+    ///   "Bundesliga" queries return the same 11 plus
+    ///   Vavoo/Telekom duplicates of every number, so they
+    ///   are deliberately NOT used.)
+    static let leagueSearches: [Int: [String]] = [
+        League.spain.rawValue: ["La Liga"],
+        League.italy.rawValue: ["Sky Calcio", "Sky Sports Serie A"],
+        League.france.rawValue: ["Ligue 1", "Leauge 1"],
+        League.germany.rawValue: ["Sky Sport Bundesliga"],
+    ]
+
     /// Catalog page size the addon serves (verified live).
     static let pageSize = 100
     /// The paging bound: at most 4 pages (400 metas) per
@@ -320,27 +376,48 @@ private enum NuvioClient {
     /// as a whole never fails — the store decides what an
     /// empty fold means (it keeps its last-good fold).
     static func fetchNetworkFold() async -> [NuvioWire.Meta] {
+        await fetchSearchFold(queries: networkFamilies)
+    }
+
+    /// One league's channel fold (see leagueSearches): the
+    /// same search-fold shape as the family fold, scoped to
+    /// the league's own queries. Best-effort per query and as
+    /// a whole, under the same shared deadline.
+    static func fetchLeagueFold(queries: [String]) async -> [NuvioWire.Meta] {
+        await fetchSearchFold(queries: queries)
+    }
+
+    /// A set of Networks search-index queries in parallel
+    /// under one shared deadline — the shape both folds use.
+    /// Searches do not page on this instance, so one request
+    /// per query is the whole walk.
+    private static func fetchSearchFold(queries: [String]) async -> [NuvioWire.Meta] {
         let deadline = Date().addingTimeInterval(foldDeadline)
         return await withTaskGroup(of: [NuvioWire.Meta].self) { group in
-            for family in networkFamilies {
-                group.addTask {
-                    // The probed encoding: alphanumerics plus
-                    // -._~ survive, so "Canal+ Sport" reaches
-                    // the index as Canal%2B%20Sport.
-                    let allowed = CharacterSet.alphanumerics
-                        .union(CharacterSet(charactersIn: "-._~"))
-                    guard let query = family.addingPercentEncoding(withAllowedCharacters: allowed),
-                          let url = URL(string: "https://nuviosports.xyz/catalog/tv/\(networksCatalogID)/search=\(query).json"),
-                          let data = try? await fetch(url, deadline: deadline),
-                          let decoded = try? JSONDecoder().decode(NuvioWire.CatalogPage.self, from: data)
-                    else { return [] }
-                    return decoded.metas
-                }
+            for query in queries {
+                group.addTask { await searchMetas(query, deadline: deadline) }
             }
             var all: [NuvioWire.Meta] = []
             for await metas in group { all += metas }
             return all
         }
+    }
+
+    /// One Networks search-index query, unpaged. A request
+    /// that fails, decodes badly or misses the deadline
+    /// contributes nothing.
+    private static func searchMetas(_ query: String, deadline: Date) async -> [NuvioWire.Meta] {
+        // The probed encoding: alphanumerics plus
+        // -._~ survive, so "Canal+ Sport" reaches
+        // the index as Canal%2B%20Sport.
+        let allowed = CharacterSet.alphanumerics
+            .union(CharacterSet(charactersIn: "-._~"))
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed),
+              let url = URL(string: "https://nuviosports.xyz/catalog/tv/\(networksCatalogID)/search=\(encoded).json"),
+              let data = try? await fetch(url, deadline: deadline),
+              let decoded = try? JSONDecoder().decode(NuvioWire.CatalogPage.self, from: data)
+        else { return [] }
+        return decoded.metas
     }
 
     /// The stream list for one meta, unfiltered — the store
@@ -417,6 +494,17 @@ final class NuvioStore: ObservableObject {
     /// 1.19 review records the same).
     private var lastGoodFold: [NuvioWire.Meta] = []
 
+    /// Per-league channel sections for the league tabs,
+    /// keyed by League rawValue (see NuvioClient.leagueSearches
+    /// and the file header): the league fold's channels,
+    /// published under the same last-good rule as every other
+    /// section — an empty league fold keeps the league's
+    /// last-good channels, and a league whose fold has never
+    /// answered simply has no entry here, so its tab renders
+    /// exactly as it did before 1.4.0.
+    @Published private(set) var leagueChannels: [Int: [NuvioItem]] = [:]
+    private var lastGoodLeagueFold: [Int: [NuvioWire.Meta]] = [:]
+
     /// The refresh task-group id the fold reports under —
     /// not a catalog id, so the catalog switch below never
     /// claims it. `nonisolated` because the fold's task-group
@@ -426,6 +514,11 @@ final class NuvioStore: ObservableObject {
     /// #5's single error). The value is a compile-time
     /// constant sentinel, so sharing it is safe.
     private nonisolated static let foldTaskID = "__nuvio_fold__"
+
+    /// The league folds report under this prefix + the league
+    /// rank ("__nuvio_league_fold__:5") — again not a catalog
+    /// id, and `nonisolated` for the same reason as foldTaskID.
+    private nonisolated static let leagueFoldTaskPrefix = "__nuvio_league_fold__:"
 
     /// Catalog TTL: inside it, a tab open costs no fetch.
     private static let catalogTTL: TimeInterval = 5 * 60
@@ -479,13 +572,33 @@ final class NuvioStore: ObservableObject {
                 group.addTask {
                     (Self.foldTaskID, await NuvioClient.fetchNetworkFold())
                 }
+                // The league folds ride the same group: the
+                // search extra they query lives on the Networks
+                // catalog, so they are scoped exactly like the
+                // family fold.
+                for (rank, queries) in NuvioClient.leagueSearches {
+                    group.addTask {
+                        (Self.leagueFoldTaskPrefix + "\(rank)",
+                         await NuvioClient.fetchLeagueFold(queries: queries))
+                    }
+                }
             }
             var liveMetas = lastGoodLive
             var upcomingMetas = lastGoodUpcoming
             var networkMetas = lastGoodNetworks
             var foldMetas = lastGoodFold
+            var leagueFoldMetas = lastGoodLeagueFold
             for await (id, metas) in group {
-                if id == Self.foldTaskID {
+                if id.hasPrefix(Self.leagueFoldTaskPrefix) {
+                    // A league fold arrival: an empty answer
+                    // keeps the league's last-good fold, the
+                    // same rule as the family fold below.
+                    let rank = Int(String(id.dropFirst(Self.leagueFoldTaskPrefix.count))) ?? -1
+                    if !metas.isEmpty {
+                        leagueFoldMetas[rank] = metas
+                        lastGoodLeagueFold[rank] = metas
+                    }
+                } else if id == Self.foldTaskID {
                     // An empty fold never replaces the
                     // last-good fold (see lastGoodFold above).
                     if !metas.isEmpty {
@@ -519,6 +632,16 @@ final class NuvioStore: ObservableObject {
                 if !composed.live.isEmpty { liveEvents = composed.live }
                 if !composed.upcoming.isEmpty { upcomingEvents = composed.upcoming }
                 if !composed.channels.isEmpty { channels = composed.channels }
+                // League channel sections publish from their
+                // own folds, independently of the EN sections
+                // above: a league whose composed channels are
+                // non-empty (re)publishes, and an empty
+                // composition never clears a section already
+                // on screen.
+                for (rank, metas) in leagueFoldMetas {
+                    let items = Self.leagueChannelItems(from: metas)
+                    if !items.isEmpty { leagueChannels[rank] = items }
+                }
             }
         }
         if hasContent { lastFetch = Date() }
@@ -570,6 +693,27 @@ final class NuvioStore: ObservableObject {
             if seenUpcoming.insert(item.id).inserted { upcomingOut.append(item) }
         }
         return (liveOut, upcomingOut, channelOut)
+    }
+
+    /// One league's channel section from its fold metas: the
+    /// same field-driven rule as the EN fold (only a "24/7"
+    /// meta is a channel), deduped by meta id. The search
+    /// index returns a numbered family scrambled (Bundesliga
+    /// 3, 4, 5 … 10, 1, 2 in tonight's probe), so the section
+    /// is sorted by display name with numeric chunks compared
+    /// numerically — the one place a fold's order is not kept
+    /// verbatim, because a numbered channel rail in raw index
+    /// order reads as broken on the TV.
+    private static func leagueChannelItems(from metas: [NuvioWire.Meta]) -> [NuvioItem] {
+        var seen = Set<String>()
+        var out: [NuvioItem] = []
+        for meta in metas where (meta.releaseInfo ?? "") == "24/7" {
+            let item = item(from: meta, kind: .channel)
+            if seen.insert(item.id).inserted { out.append(item) }
+        }
+        return out.sorted {
+            $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
     }
 
     private static func item(from meta: NuvioWire.Meta, kind: NuvioItem.Kind) -> NuvioItem {
@@ -810,13 +954,18 @@ final class NuvioStore: ObservableObject {
 
 // MARK: - Cards (the EN section's existing idiom)
 
-/// One addon 24/7 channel in the BLV Anh tab: the same
-/// 470×252 card as TVENChannelCard — logo, name, a chip, a
-/// play line — with the chip naming the source so the owner
-/// can tell addon channels from the old block at a glance.
+/// One addon 24/7 channel: the same 470×252 card as
+/// TVENChannelCard — logo, name, a chip, a play line — with
+/// the chip naming the source so the owner can tell addon
+/// channels from the old block at a glance. In the BLV Anh
+/// tab the play line names the English block; a league tab
+/// passes its own line via detailPrefix (the Đức rail's
+/// channels are German, and the card must not call them
+/// English).
 struct NuvioChannelCard: View {
     let item: NuvioItem
     let focused: Bool
+    var detailPrefix: String = "Kênh tiếng Anh"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -847,7 +996,7 @@ struct NuvioChannelCard: View {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 26))
                     .foregroundStyle(TVPalette.cyan)
-                Text(item.league.map { "Kênh tiếng Anh · \($0)" } ?? "Kênh tiếng Anh · phát liên tục")
+                Text(item.league.map { "\(detailPrefix) · \($0)" } ?? "\(detailPrefix) · phát liên tục")
                     .font(.system(size: 20))
                     .foregroundStyle(.white.opacity(0.62))
                     .lineLimit(1)

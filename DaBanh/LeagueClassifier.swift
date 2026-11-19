@@ -5,11 +5,16 @@ import Foundation
 ///
 /// Rules, exactly as on Android:
 /// - A channel's league is decided ONLY by keyword-matching its lowercased
-///   title, checked in the order Anh → Tây Ban Nha → Ý → Pháp. The
+///   title, checked in the order Anh → Tây Ban Nha → Ý → Pháp → Đức. The
 ///   group-title (source brand) plays no part. No match → 9 (Khác).
 ///   (The Android source also defines LG_GER and LG_VIE keyword lists but
-///   leagueOf never consults them — German and Vietnamese matches fall into
-///   Khác there, and they do here too. See README.)
+///   leagueOf never consults them there. Since 1.4.0 this port DOES
+///   consult an extended LG_GER as the fifth check — German matches get
+///   their own tab here instead of falling into Khác. The check runs
+///   last, after Pháp, so no title's classification into ranks 1–4 can
+///   change; the only possible change is a title that used to fall
+///   through to Khác (9) now matching Đức (5).
+///   LG_VIE is still never consulted, on either platform. See README.)
 /// - Sort buckets: 0 = live window (kickoff −10 min … +125 min),
 ///   1 = upcoming match in a priority league, 2 = upcoming match in Khác,
 ///   3 = everything else (no kickoff, or long finished).
@@ -20,11 +25,22 @@ enum LeagueClassifier {
 
     // Keyword lists copied verbatim from the Android source (LG_ENG,
     // LG_SPAIN, LG_ITA, LG_FRA). Matching is `title.contains(keyword)` on
-    // the lowercased title.
+    // the lowercased title. The germany list starts from Android's LG_GER
+    // (first ten entries, in its order) and extends it in the same style —
+    // the current Bundesliga regulars LG_GER misses (Köln, Union Berlin,
+    // Hamburg, Werder Bremen, Freiburg, Augsburg, Mainz, Heidenheim,
+    // St. Pauli, Holstein Kiel) plus big 2. Bundesliga names (Hertha,
+    // Schalke, Bochum, Bielefeld, Magdeburg, Darmstadt), the way england
+    // keeps relegated clubs.
     private static let spain = ["tây ban nha", "la liga", "real madrid", "barcelona", "atlético", "atletico", "sevilla", "valencia cf", "real sociedad", "athletic", "real betis", "betis", "villarreal", "celta", "getafe", "espanyol", "mallorca", "osasuna", "rayo", "girona", "alavés", "alaves", "las palmas", "leganés", "leganes", "valladolid"]
     private static let england = ["ngoại hạng", "premier league", "arsenal", "chelsea", "liverpool", "manchester", "man utd", "man city", "tottenham", "newcastle", "aston villa", "west ham", "brighton", "everton", "wolves", "fulham", "brentford", "crystal palace", "nottingham", "leicester", "ipswich", "southampton", "bournemouth"]
     private static let italy = ["serie a", "napoli", "internazionale", "inter milan", "ac milan", "juventus", "as roma", "lazio", "atalanta", "fiorentina", "bologna", "torino", "como", "udinese", "genoa", "cagliari", "parma", "sassuolo", "verona", "lecce"]
     private static let france = ["ligue 1", "paris saint", "psg", "marseille", "monaco", "lille ", "losc", "olympique lyon", "lyon", "ogc nice", "nice", "lens", "rennes", "strasbourg", "toulouse", "brestois", "brest", "nantes", "angers", "auxerre", "le havre", "metz", "lorient", "le mans"]
+    // Note: no bare "kiel" — it is a substring of "Kielce"
+    // (Korona Kielce, Poland), which tonight's addon data
+    // proved it steals; "holstein" alone carries Holstein
+    // Kiel, whose name is never written without it.
+    private static let germany = ["bundesliga", "bayern", "dortmund", "leverkusen", "leipzig", "stuttgart", "frankfurt", "wolfsburg", "gladbach", "hoffenheim", "union berlin", "köln", "koln", "cologne", "werder", "bremen", "freiburg", "augsburg", "mainz", "heidenheim", "st. pauli", "st pauli", "hamburg", "hsv", "holstein", "hertha", "schalke", "bochum", "bielefeld", "magdeburg", "darmstadt"]
 
     static func leagueRank(of title: String) -> Int {
         let t = title.lowercased()
@@ -32,6 +48,7 @@ enum LeagueClassifier {
         for k in spain where t.contains(k) { return 2 }
         for k in italy where t.contains(k) { return 3 }
         for k in france where t.contains(k) { return 4 }
+        for k in germany where t.contains(k) { return 5 }
         return 9
     }
 
@@ -93,7 +110,7 @@ enum LeagueClassifier {
     static let enGroupName = "EN · BLV Anh"
 
     /// selectedLeague value meaning "the BLV Anh tab" (league
-    /// rawValues are 1, 2, 3, 4 and 9; PlaylistStore uses 0 for the
+    /// rawValues are 1, 2, 3, 4, 5 and 9; PlaylistStore uses 0 for the
     /// Hot tab and -1 for Trực tiếp, so -2 is free).
     static let enTabValue = -2
 
