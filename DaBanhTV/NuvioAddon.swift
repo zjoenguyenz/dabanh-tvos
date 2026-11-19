@@ -33,6 +33,29 @@ import SwiftUI
 /// Entries with no `url` (the addon's donation row is one) are
 /// unplayable by construction and are dropped at parse time.
 ///
+/// The 4-page window is not the whole addon, though: probed
+/// live 2026-11-19, marquee channels sit beyond it in the
+/// Networks order (Canal+ Foot first appears on page 5,
+/// SuperSport Premier League on page 9; Astro SuperSport 1–4
+/// sit on page 4, one reorder away from falling out). The
+/// channel section is therefore extended with a fold from the
+/// addon's own search index (the Networks catalog declares a
+/// `search` extra): one unpaged search per football-
+/// broadcaster family — the 22 families at
+/// NuvioClient.networkFamilies, the set the iOS 1.19 review
+/// proved against this same addon. Queries whose tokens
+/// degenerate into generic matches ("V Sport", "Sport TV",
+/// "USA Network") are deliberately NOT used; Setanta / Optus
+/// / Peacock are not carried at all; Sport TV 1–7 (Portugal)
+/// cannot be isolated by search and stays unfolded — the same
+/// recorded residual as iOS. Fold results classify by the
+/// same field-driven rule (releaseInfo "24/7" → channel) and
+/// merge into the channel section deduped by meta id, the
+/// catalogs' own entries winning collisions. The fold is
+/// best-effort: it never gates the snapshot, and a fold that
+/// answers empty keeps its last-good results, exactly like a
+/// catalog.
+///
 /// Playback verification reuses the 1.3.7 machinery where it
 /// fits: StreamVerifier (PlaylistStore.swift — its access was
 /// widened from `private` for exactly this reuse) judges every
@@ -205,6 +228,33 @@ private enum NuvioClient {
         "nuvio_sports_networks",
     ]
 
+    /// The catalog the search fold queries (its manifest
+    /// entry declares the `search` extra).
+    static let networksCatalogID = "nuvio_sports_networks"
+
+    /// Football-broadcaster families folded in from the
+    /// Networks catalog through its search index — the
+    /// channels the 4-page catalog window cannot reach (see
+    /// the file header). The same 22 families the iOS 1.19
+    /// review probed live against this addon: every one
+    /// returns a clean family set in a single unpaged
+    /// response, all of it releaseInfo "24/7".
+    private static let networkFamilies = [
+        "Sky Sports", "TNT Sports", "beIN Sports", "SuperSport",
+        "Premier Sports", "ESPN", "Astro SuperSport",
+        "Canal+ Sport", "Canal+ Foot", "DAZN", "Nova Sport",
+        "Arena Sport", "Digi Sport", "Orange Sport",
+        "Prima Sport", "Eleven Sports", "Ziggo Sport",
+        "RMC Sport", "Viaplay Sport", "CBS Sports", "FOX Sports",
+        "Stan Sport",
+    ]
+
+    /// The fold's overall deadline: all 22 family searches
+    /// together get the same 25 s a single catalog request
+    /// gets, so the fold can never hold a refresh open longer
+    /// than the fetches it rides with.
+    private static let foldDeadline: TimeInterval = 25
+
     /// Catalog page size the addon serves (verified live).
     static let pageSize = 100
     /// The paging bound: at most 4 pages (400 metas) per
@@ -260,6 +310,39 @@ private enum NuvioClient {
         return out
     }
 
+    /// The Networks search fold: one search request per
+    /// football-broadcaster family, all 22 in parallel under
+    /// one deadline. Searches do not page on this instance —
+    /// a combined search+skip path 404s (probed on iOS) — so
+    /// one request per family is the whole walk. Best-effort
+    /// per family: a request that fails, decodes badly or
+    /// misses the deadline contributes nothing, and the fold
+    /// as a whole never fails — the store decides what an
+    /// empty fold means (it keeps its last-good fold).
+    static func fetchNetworkFold() async -> [NuvioWire.Meta] {
+        let deadline = Date().addingTimeInterval(foldDeadline)
+        return await withTaskGroup(of: [NuvioWire.Meta].self) { group in
+            for family in networkFamilies {
+                group.addTask {
+                    // The probed encoding: alphanumerics plus
+                    // -._~ survive, so "Canal+ Sport" reaches
+                    // the index as Canal%2B%20Sport.
+                    let allowed = CharacterSet.alphanumerics
+                        .union(CharacterSet(charactersIn: "-._~"))
+                    guard let query = family.addingPercentEncoding(withAllowedCharacters: allowed),
+                          let url = URL(string: "https://nuviosports.xyz/catalog/tv/\(networksCatalogID)/search=\(query).json"),
+                          let data = try? await fetch(url, deadline: deadline),
+                          let decoded = try? JSONDecoder().decode(NuvioWire.CatalogPage.self, from: data)
+                    else { return [] }
+                    return decoded.metas
+                }
+            }
+            var all: [NuvioWire.Meta] = []
+            for await metas in group { all += metas }
+            return all
+        }
+    }
+
     /// The stream list for one meta, unfiltered — the store
     /// drops the url-less entries when it builds the ladder.
     static func fetchStreams(type: String, id: String) async throws -> [NuvioWire.AddonStream] {
@@ -271,9 +354,19 @@ private enum NuvioClient {
         return try JSONDecoder().decode(NuvioWire.StreamPage.self, from: data).streams
     }
 
-    private static func fetch(_ url: URL) async throws -> Data {
+    /// One fetch. With a deadline (the fold passes one) the
+    /// budget is a hard bound, not a hint: an expired budget
+    /// fails at once, and the request's own timeout is capped
+    /// at the time remaining. Without one, the standing 25 s
+    /// request timeout applies, exactly as before.
+    private static func fetch(_ url: URL, deadline: Date? = nil) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 25
+        if let deadline {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { throw URLError(.timedOut) }
+            request.timeoutInterval = min(25, remaining)
+        }
         request.setValue("Mozilla/5.0 (Linux; Android 14; TV)",
                          forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
@@ -302,17 +395,32 @@ final class NuvioStore: ObservableObject {
 
     /// Last-good metas per catalog, kept at the META level:
     /// the channel section is composed from TWO catalogs
-    /// (Networks canonical, Live Now's 24/7 strays after), so
-    /// a section-level keep-last-good is not enough — if
-    /// Networks fails while Live answers, composing from the
-    /// fresh lists alone would shrink the channel rail to
-    /// the strays. A catalog that answers empty or fails
-    /// contributes its last-good metas to the composition
-    /// instead, so its section can only be replaced by a
-    /// catalog that actually answered.
+    /// (Networks canonical, Live Now's 24/7 strays after) plus
+    /// the search fold, so a section-level keep-last-good is
+    /// not enough — if Networks fails while Live answers,
+    /// composing from the fresh lists alone would shrink the
+    /// channel rail to the strays. A catalog that answers
+    /// empty or fails contributes its last-good metas to the
+    /// composition instead, so its section can only be
+    /// replaced by a catalog that actually answered.
     private var lastGoodLive: [NuvioWire.Meta] = []
     private var lastGoodUpcoming: [NuvioWire.Meta] = []
     private var lastGoodNetworks: [NuvioWire.Meta] = []
+
+    /// Last-good search-fold metas, under the same rule as
+    /// the catalogs: the fold is best-effort per family, so
+    /// an EMPTY fold answer — every family failed or missed
+    /// the deadline — keeps the previous fold instead of
+    /// un-folding channels the tab already had. A non-empty
+    /// fold replaces it wholesale; per-family flicker inside
+    /// a non-empty fold is the accepted residual (the iOS
+    /// 1.19 review records the same).
+    private var lastGoodFold: [NuvioWire.Meta] = []
+
+    /// The refresh task-group id the fold reports under —
+    /// not a catalog id, so the catalog switch below never
+    /// claims it.
+    private static let foldTaskID = "__nuvio_fold__"
 
     /// Catalog TTL: inside it, a tab open costs no fetch.
     private static let catalogTTL: TimeInterval = 5 * 60
@@ -345,7 +453,10 @@ final class NuvioStore: ObservableObject {
     /// published section — the addon flapping must never
     /// blank a section it filled a minute ago, and with every
     /// section empty the tab simply falls back to the old EN
-    /// block below.
+    /// block below. The search fold rides the same group
+    /// under the same rule (an empty fold keeps the last-good
+    /// fold): it publishes through the same recompose and
+    /// never gates, delays or blanks a catalog section.
     func refresh() async {
         if loading { return }
         loading = true
@@ -359,13 +470,27 @@ final class NuvioStore: ObservableObject {
             for id in ids {
                 group.addTask { (id, await NuvioClient.fetchCatalog(id: id)) }
             }
+            if ids.contains(NuvioClient.networksCatalogID) {
+                group.addTask {
+                    (Self.foldTaskID, await NuvioClient.fetchNetworkFold())
+                }
+            }
             var liveMetas = lastGoodLive
             var upcomingMetas = lastGoodUpcoming
             var networkMetas = lastGoodNetworks
+            var foldMetas = lastGoodFold
             for await (id, metas) in group {
-                // An empty answer never replaces a catalog's
-                // last-good metas (see lastGoodLive above).
-                if !metas.isEmpty {
+                if id == Self.foldTaskID {
+                    // An empty fold never replaces the
+                    // last-good fold (see lastGoodFold above).
+                    if !metas.isEmpty {
+                        foldMetas = metas
+                        lastGoodFold = metas
+                    }
+                } else if !metas.isEmpty {
+                    // An empty answer never replaces a
+                    // catalog's last-good metas (see
+                    // lastGoodLive above).
                     switch id {
                     case "nuvio_sports_live":
                         liveMetas = metas
@@ -380,11 +505,12 @@ final class NuvioStore: ObservableObject {
                     }
                 }
                 // Publish progressively as catalogs land: the
-                // composition is a pure function of the three
+                // composition is a pure function of the four
                 // lists, so recomposing on each arrival is safe.
                 let composed = Self.compose(live: liveMetas,
                                             upcoming: upcomingMetas,
-                                            networks: networkMetas)
+                                            networks: networkMetas,
+                                            fold: foldMetas)
                 if !composed.live.isEmpty { liveEvents = composed.live }
                 if !composed.upcoming.isEmpty { upcomingEvents = composed.upcoming }
                 if !composed.channels.isEmpty { channels = composed.channels }
@@ -399,10 +525,17 @@ final class NuvioStore: ObservableObject {
     /// section, everything else is a live event. Upcoming
     /// entries whose id is already live are dropped (live
     /// wins). Channels dedupe by id, Networks first (it is
-    /// the canonical channel list), Live Now's strays after.
+    /// the canonical channel list), Live Now's strays after,
+    /// the search fold last: a catalog entry always wins a
+    /// collision and keeps its catalog position, so the fold
+    /// only ADDS the channels the 4-page window cannot reach.
+    /// Fold metas classify by the same field rule — only a
+    /// "24/7" fold meta is a channel; anything else the index
+    /// returns is not this fold's to route and is dropped.
     private static func compose(live: [NuvioWire.Meta],
                                 upcoming: [NuvioWire.Meta],
-                                networks: [NuvioWire.Meta])
+                                networks: [NuvioWire.Meta],
+                                fold: [NuvioWire.Meta])
         -> (live: [NuvioItem], upcoming: [NuvioItem], channels: [NuvioItem]) {
         var liveOut: [NuvioItem] = []
         var channelOut: [NuvioItem] = []
@@ -420,6 +553,10 @@ final class NuvioStore: ObservableObject {
                 let item = item(from: meta, kind: .liveEvent)
                 if liveIDs.insert(item.id).inserted { liveOut.append(item) }
             }
+        }
+        for meta in fold where (meta.releaseInfo ?? "") == "24/7" {
+            let item = item(from: meta, kind: .channel)
+            if seenChannels.insert(item.id).inserted { channelOut.append(item) }
         }
         var upcomingOut: [NuvioItem] = []
         var seenUpcoming = Set<String>()
