@@ -41,7 +41,7 @@ struct TVContentView: View {
 
     private struct PlayRequest: Identifiable {
         let id = UUID()
-        let sources: [Channel]
+        let resolution: MatchResolution
     }
 
     private enum HeroItem {
@@ -68,14 +68,51 @@ struct TVContentView: View {
         return raw.filter { !TVEnglish.isEnglish($0) }
     }
 
-    private var entries: [TVFixtureEntry] { TVFixtureEntry.group(tabChannels) }
+    /// The tab's fixtures with the owner's Manchester United pin
+    /// applied (2026-11-19): a live or upcoming MU fixture leads
+    /// the list — and with it the hero default and its bucket
+    /// rail — while every other entry keeps the store's order
+    /// exactly. See TVFixtureEntry.pinnedFirst.
+    private var entries: [TVFixtureEntry] {
+        TVFixtureEntry.pinnedFirst(TVFixtureEntry.group(tabChannels))
+    }
 
     /// Featured rail entries: the first live fixtures on the
     /// Trực tiếp tab (which the store fills with live matches only,
-    /// and opens on whenever anything is live).
+    /// and opens on whenever anything is live) — with one addition
+    /// for the pin: when MU is only UPCOMING, this tab's own list
+    /// (live matches only) does not carry the fixture at all, so
+    /// the pinned MU entry is prepended from the wider loaded
+    /// data and the hero + featured rail still lead with it, as
+    /// the owner's "MU sắp đá hoặc đang đá thì luôn nằm đầu tiên"
+    /// requires. The live fixture displaced from the rail's tenth
+    /// slot is not lost: the ĐANG ĐÁ rail below excludes only
+    /// featured ids, so it reappears there.
     private var featuredEntries: [TVFixtureEntry] {
         guard store.selectedLeague == PlaylistStore.liveTabValue else { return [] }
+        if entries.contains(where: { $0.isManchesterUnited }) {
+            return Array(entries.prefix(10))
+        }
+        if let pin = muPinEntry {
+            return Array(([pin] + entries).prefix(10))
+        }
         return Array(entries.prefix(10))
+    }
+
+    /// The best Manchester United fixture in everything the store
+    /// has loaded — live first, then nearest kickoff — or nil
+    /// when MU has no live or upcoming match in the data. Built
+    /// from the lists already in memory (the same channels +
+    /// hotChannels merge PlaylistStore.liveChannels uses, EN
+    /// block excluded, deduplicated by URL): the pin never costs
+    /// an extra fetch.
+    private var muPinEntry: TVFixtureEntry? {
+        var seen = Set<String>()
+        var pool: [Channel] = []
+        for ch in store.channels + store.hotChannels where !TVEnglish.isEnglish(ch) {
+            if seen.insert(ch.url).inserted { pool.append(ch) }
+        }
+        return TVFixtureEntry.manchesterUnitedPin(in: TVFixtureEntry.group(pool))
     }
 
     /// The English block, merged from both published lists and
@@ -107,13 +144,29 @@ struct TVContentView: View {
             .padding(.bottom, 28)
         }
         .task { await store.start() }
+        .task(id: muPinEntry?.id) {
+            // Pre-resolve the pinned Manchester United fixture
+            // (2026-11-19): when a pin exists, its sources are
+            // verified into the store's resolve cache at open, so
+            // tapping the priority match starts from a verified
+            // ladder with no resolve wait. The hook is keyed on
+            // the pin's identity — a new pin supersedes the old
+            // pre-resolve inside the store, and the pin vanishing
+            // cancels it; nothing is pre-resolved when no MU
+            // fixture is pinned.
+            if let pin = muPinEntry {
+                store.preResolve(pin.channel)
+            } else {
+                store.cancelPreResolve()
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await store.refreshIfStale() }
             }
         }
         .fullScreenCover(item: $playRequest) { request in
-            TVPlayerView(sources: request.sources)
+            TVPlayerView(resolution: request.resolution)
         }
         .onChange(of: focusedKey) { _, key in
             guard let key else { return }
@@ -294,7 +347,7 @@ struct TVContentView: View {
     private var scrollBody: some View {
         if isENTab {
             enBody
-        } else if entries.isEmpty {
+        } else if entries.isEmpty && featuredEntries.isEmpty {
             Spacer()
             if store.isLoading {
                 ProgressView("Đang tải danh sách…")
@@ -349,7 +402,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.3.5")
+            Text("Đá Banh TV v1.3.7")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -385,7 +438,7 @@ struct TVContentView: View {
                                 LazyHStack(spacing: 28) {
                                     ForEach(enChannels) { ch in
                                         Button {
-                                            playRequest = PlayRequest(sources: [ch])
+                                            playRequest = PlayRequest(resolution: store.resolution(for: ch))
                                         } label: {
                                             TVENChannelCard(
                                                 channel: ch,
@@ -478,7 +531,7 @@ struct TVContentView: View {
     private func englishHero(_ ch: Channel) -> some View {
         let heroFocused = focusedKey == "heroEN:" + ch.url
         return Button {
-            playRequest = PlayRequest(sources: [ch])
+            playRequest = PlayRequest(resolution: store.resolution(for: ch))
         } label: {
             HStack(alignment: .center, spacing: 36) {
                 VStack(alignment: .leading, spacing: 14) {
@@ -641,11 +694,14 @@ struct TVContentView: View {
 
     // MARK: - Playing
 
-    /// Playing a fixture hands the player the store's own ladder —
-    /// every displayable channel carrying the match, tapped one
-    /// first (the same ladder the phone uses; the TV view used to
-    /// rebuild it by hand).
+    /// Playing a fixture hands the player the store's resolution
+    /// for it: the store's own ladder (every displayable channel
+    /// carrying the match, tapped one first — the same ladder the
+    /// phone uses), verified at open and published progressively
+    /// (PlaylistStore.resolution(for:)). A fixture the pin
+    /// pre-resolved resolves from the cache instead, so the
+    /// priority match is also the fastest to open.
     private func play(_ entry: TVFixtureEntry) {
-        playRequest = PlayRequest(sources: store.sources(for: entry.channel))
+        playRequest = PlayRequest(resolution: store.resolution(for: entry.channel))
     }
 }

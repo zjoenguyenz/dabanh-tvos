@@ -99,6 +99,76 @@ struct TVFixtureEntry: Identifiable {
             TVFixtureEntry(channel: g.members[0], sourceCount: g.members.count, id: g.id)
         }
     }
+
+    // MARK: - Manchester United priority pin (owner, 2026-11-19)
+
+    /// True when either side of this fixture is Manchester United.
+    /// The test is the app's own club identity, not a name list of
+    /// my own: a side counts as MU exactly when the crest chain
+    /// (Crests.url(forTeam:), with its ĐTQG / Nữ / age-marker
+    /// strippers) resolves its name to the same badge it resolves
+    /// "Manchester United" to. In the crest map — the bundled
+    /// 459-key baseline and the mirror's live 639-key map agree —
+    /// that badge (xzqdr11517660252.png) is keyed by "manchester
+    /// united", "manchester utd", "man united" and "man utd", so
+    /// every spelling the data actually uses is covered, a future
+    /// alias the mirror map adds is picked up with no code change,
+    /// and Manchester City (a different badge) can never match.
+    /// The club's other sides the listings carry — "Nữ Manchester
+    /// Utd" (women), a "U21" youth side — resolve to the same
+    /// badge through the crest chain's strippers, so they count as
+    /// the club too, exactly as their tiles already show the MU
+    /// crest.
+    var isManchesterUnited: Bool {
+        guard let teams,
+              let badge = Crests.url(forTeam: "Manchester United")
+        else { return false }
+        return Crests.url(forTeam: teams.0) == badge
+            || Crests.url(forTeam: teams.1) == badge
+    }
+
+    /// True when the fixture may be pinned: Manchester United AND
+    /// live or upcoming (classifier buckets 0–2). A finished MU
+    /// listing (bucket 3 — a stale replay) is never pinned: the
+    /// pin exists so the match he is about to watch leads the
+    /// screen, not so an old replay does.
+    func isPinnableMU(now: Date) -> Bool {
+        isManchesterUnited
+            && LeagueClassifier.bucket(of: channel, now: now) < 3
+    }
+
+    /// Hoist the pinnable MU fixtures to the very front of a
+    /// fixture list: live first, then nearest kickoff (the same
+    /// order the store's sort already gives them, restated here so
+    /// the rule holds for any input order; the sort is stable).
+    /// Everything else — including a finished MU listing — keeps
+    /// its incoming order exactly, so with no live or upcoming MU
+    /// fixture in the list the result is the input untouched.
+    static func pinnedFirst(_ entries: [TVFixtureEntry],
+                            now: Date = Date()) -> [TVFixtureEntry] {
+        let pinned = entries.filter { $0.isPinnableMU(now: now) }
+        guard !pinned.isEmpty else { return entries }
+        let ordered = pinned.sorted { a, b in
+            let ba = LeagueClassifier.bucket(of: a.channel, now: now)
+            let bb = LeagueClassifier.bucket(of: b.channel, now: now)
+            if ba != bb { return ba < bb }
+            let ka = a.channel.kickoff?.timeIntervalSince1970 ?? .greatestFiniteMagnitude
+            let kb = b.channel.kickoff?.timeIntervalSince1970 ?? .greatestFiniteMagnitude
+            return ka < kb
+        }
+        let pinnedIDs = Set(ordered.map(\.id))
+        return ordered + entries.filter { !pinnedIDs.contains($0.id) }
+    }
+
+    /// The one fixture the pin puts first in a list, if any: the
+    /// live MU match, else the nearest upcoming one.
+    static func manchesterUnitedPin(in entries: [TVFixtureEntry],
+                                    now: Date = Date()) -> TVFixtureEntry? {
+        guard let first = pinnedFirst(entries, now: now).first,
+              first.isPinnableMU(now: now)
+        else { return nil }
+        return first
+    }
 }
 
 // MARK: - English-commentary channels

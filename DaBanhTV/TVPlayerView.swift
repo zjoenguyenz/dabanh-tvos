@@ -8,54 +8,109 @@ import SwiftUI
 /// automatically, and only when all of them fail does the view settle
 /// on a "no signal" slate. AVPlayerViewController brings the standard
 /// remote transport controls (play/pause, scrub, Menu to exit).
+///
+/// v1.3.7: the sources arrive as a MatchResolution, not a fixed
+/// list — the store verifies the fixture's ladder before (and
+/// while) the player runs, so the ladder can GROW behind the
+/// playing source and its membership can change when the finished
+/// ladder lands. The playing source is therefore tracked by URL,
+/// never by index: a republication can reorder or extend the list
+/// without disturbing what is on screen, and "advance" means the
+/// first rung this view has not tried yet, in the ladder's current
+/// order. A failure with no untried rung left is only final once
+/// the resolution is finished; until then the view waits on the
+/// loading capsule for later-verified rungs, exactly as it waits
+/// for the first batch.
 struct TVPlayerView: View {
-    let sources: [Channel]
+    @ObservedObject var resolution: MatchResolution
     @Environment(\.dismiss) private var dismiss
-    @State private var index = 0
+    @State private var currentURL: String?
+    @State private var tried: Set<String> = []
     @State private var exhausted = false
     @State private var switching = true
+
+    private var current: ResolvedSource? {
+        resolution.sources.first { $0.channel.url == currentURL }
+    }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if exhausted {
                 noSignal
-            } else if sources.indices.contains(index), sources[index].streamURL != nil {
-                PlayerController(channel: sources[index], onFail: advance, onReady: { switching = false })
-                    .id(index)
-                    .ignoresSafeArea()
+            } else if let current {
+                if current.channel.streamURL != nil {
+                    PlayerController(channel: current.channel, onFail: advance,
+                                     onReady: { switching = false })
+                        .id(current.channel.url)
+                        .ignoresSafeArea()
+                } else {
+                    // An unparseable URL counts as a failed source.
+                    Color.clear.onAppear { advance() }
+                }
                 if switching {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Text(index == 0 ? "Đang tải…" : "Đang chuyển nguồn khác…")
-                                .font(.callout)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 8)
-                                .background(Capsule().fill(Color.black.opacity(0.55)))
-                            Spacer()
-                        }
-                        .padding(.leading, 48)
-                        .padding(.bottom, 36)
-                    }
-                    .ignoresSafeArea()
+                    statusCapsule(current)
                 }
             } else {
-                // An unparseable URL counts as a failed source.
-                Color.clear.onAppear { advance() }
+                // Nothing to play yet: the first verified batch is
+                // still landing, or every tried rung failed and the
+                // resolve is still verifying more.
+                statusCapsule(nil)
             }
         }
         .onExitCommand { dismiss() }
+        .onAppear { pump() }
+        .onChange(of: resolution.sources) { _, _ in pump() }
+        .onChange(of: resolution.finished) { _, _ in pump() }
+    }
+
+    /// The existing loading capsule, unchanged but for one
+    /// addition: when the rung being loaded carries a quality
+    /// parsed from its own master playlist during pre-flight, the
+    /// capsule names it ("Đang tải · 1080p…") — the only quality
+    /// label the app shows for a stream, and it comes from the
+    /// playlist itself, never from a title's "[FHD]" decoration.
+    private func statusCapsule(_ current: ResolvedSource?) -> some View {
+        var text = tried.isEmpty ? "Đang tải…" : "Đang chuyển nguồn khác…"
+        if let quality = current?.quality { text += " · \(quality)" }
+        return VStack {
+            Spacer()
+            HStack {
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                Spacer()
+            }
+            .padding(.leading, 48)
+            .padding(.bottom, 36)
+        }
+        .ignoresSafeArea()
+    }
+
+    /// Start the first untried rung whenever there is a gap to
+    /// fill: at presentation, when the ladder grows or finishes,
+    /// and after a failure (via advance). With no untried rung,
+    /// the ladder being finished is what makes the failure final.
+    private func pump() {
+        guard !exhausted, currentURL == nil else { return }
+        if let next = resolution.sources.first(where: { !tried.contains($0.channel.url) }) {
+            currentURL = next.channel.url
+            switching = true
+        } else if resolution.finished {
+            exhausted = true
+        } else {
+            switching = true
+        }
     }
 
     private func advance() {
-        if index + 1 < sources.count {
-            index += 1
-            switching = true
-        } else {
-            exhausted = true
-        }
+        if let currentURL { tried.insert(currentURL) }
+        currentURL = nil
+        switching = true
+        pump()
     }
 
     private var noSignal: some View {

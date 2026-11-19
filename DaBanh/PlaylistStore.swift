@@ -350,6 +350,265 @@ final class PlaylistStore: ObservableObject {
         return out.isEmpty ? [ch] : out
     }
 
+    // MARK: - Match resolution (at-open verification, v1.3.7)
+
+    /// The client-side port of the Nuvio live-sport addon's
+    /// resolve machinery (research: LIVESPORT-PLUGIN-RESEARCH.md
+    /// §3 items 1–5), adapted to this app's shape. What existed
+    /// before: the background LinkProbe sweep (below), which hides
+    /// persistently dead links from the lists on the store's own
+    /// schedule, and the player's blind failover, which discovered
+    /// a dead source only by sitting on it. What this adds is the
+    /// at-open half: when a fixture is tapped (or pre-resolved),
+    /// its candidate ladder is verified BEFORE the player sees it
+    /// — dead links dropped, refused links repaired, verified
+    /// links published progressively under the addon's own
+    /// numbers (quorum 3, soft deadline 6 s, hard cap 15 s) — and
+    /// the result is cached with the addon's cache discipline
+    /// (single-flight, adaptive TTL 60 s doubling to a 10 min cap,
+    /// ~30 s negative entries, 200-entry LRU). The background
+    /// sweep is untouched and complementary: it curates the lists;
+    /// this curates the ladder of the one match being opened.
+
+    private static let resolveQuorum = 3
+    private static let resolveSoftDeadline: TimeInterval = 6
+    private static let resolveHardCap: TimeInterval = 15
+    private static let resolveBaseTTL: TimeInterval = 60
+    private static let resolveMaxTTL: TimeInterval = 600
+    private static let resolveNegativeTTL: TimeInterval = 30
+    private static let resolutionCacheCap = 200
+
+    private struct CachedResolution {
+        let sources: [ResolvedSource]
+        let expiresAt: Date
+        let negative: Bool
+    }
+
+    private struct InFlightResolution {
+        let resolution: MatchResolution
+        var task: Task<Void, Never>?
+        let startedByPreResolve: Bool
+        var handedToPlayer: Bool
+    }
+
+    private var resolutionInFlight: [String: InFlightResolution] = [:]
+    private var resolutionCache: [String: CachedResolution] = [:]
+    private var resolutionCacheOrder: [String] = []
+    /// Per-fixture learned TTL (the addon's adaptive TTL, keyed
+    /// here by fixture rather than by provider source).
+    private var resolutionTTLs: [String: TimeInterval] = [:]
+
+    /// The cache key for a fixture: its FixtureGrouping id (the
+    /// same identity sources(for:) ladders by), so the pin, the
+    /// pre-resolve and a tap all land on the same entry. Falls
+    /// back to the channel URL when no group claims the channel.
+    private func fixtureKey(for ch: Channel) -> String {
+        let groups = FixtureGrouping.group(channels + hotChannels)
+        if let g = groups.first(where: { $0.members.contains { $0.url == ch.url } }) {
+            return g.id
+        }
+        return "url:" + ch.url
+    }
+
+    /// The resolution a tap plays from. EN 24/7 channels keep
+    /// today's direct path (they are standalone channels, not
+    /// fixtures — sources(for:) already returns them alone);
+    /// everything else resolves through verification, the cache,
+    /// or the single in-flight resolve for that fixture.
+    func resolution(for ch: Channel) -> MatchResolution {
+        if LeagueClassifier.isEN(ch) {
+            return MatchResolution.direct([ch])
+        }
+        let ladder = sources(for: ch)
+        let key = fixtureKey(for: ch)
+        if let entry = freshCacheEntry(forKey: key) {
+            print("[Resolve] cache hit (\(entry.negative ? "negative" : "verified")) — \(key)")
+            return MatchResolution.completed(entry.sources)
+        }
+        if var flight = resolutionInFlight[key] {
+            flight.handedToPlayer = true
+            resolutionInFlight[key] = flight
+            return flight.resolution
+        }
+        let res = MatchResolution()
+        resolutionInFlight[key] = InFlightResolution(
+            resolution: res, task: nil, startedByPreResolve: false, handedToPlayer: true)
+        let task = Task { await self.runResolve(key: key, ladder: ladder, into: res) }
+        resolutionInFlight[key]?.task = task
+        return res
+    }
+
+    /// Pre-resolve one fixture into the cache (the pinned
+    /// Manchester United match, at app open — TVContentView's
+    /// pin hook). Bounded by the resolve's own deadlines and
+    /// candidate cap, single-flight with any open of the same
+    /// fixture, and superseded by the next pin: a pre-resolve
+    /// that no player has taken over is cancelled, never left
+    /// running for a match that is no longer pinned.
+    func preResolve(_ ch: Channel) {
+        if LeagueClassifier.isEN(ch) { return }
+        let key = fixtureKey(for: ch)
+        if freshCacheEntry(forKey: key) != nil { return }
+        if resolutionInFlight[key] != nil { return }
+        cancelPreResolve()
+        let ladder = sources(for: ch)
+        let res = MatchResolution()
+        resolutionInFlight[key] = InFlightResolution(
+            resolution: res, task: nil, startedByPreResolve: true, handedToPlayer: false)
+        let task = Task { await self.runResolve(key: key, ladder: ladder, into: res) }
+        resolutionInFlight[key]?.task = task
+        print("[Resolve] pre-resolving pinned fixture — \(key)")
+    }
+
+    /// Cancel the outstanding pre-resolve, if any — unless a
+    /// player has already taken that resolution over, in which
+    /// case it is a live open and runs to completion.
+    func cancelPreResolve() {
+        let keys = resolutionInFlight.compactMap { key, flight in
+            (flight.startedByPreResolve && !flight.handedToPlayer) ? key : nil
+        }
+        for key in keys {
+            resolutionInFlight[key]?.task?.cancel()
+            resolutionInFlight.removeValue(forKey: key)
+        }
+    }
+
+    private func freshCacheEntry(forKey key: String) -> CachedResolution? {
+        guard let entry = resolutionCache[key] else { return nil }
+        if entry.expiresAt <= Date() {
+            resolutionCache.removeValue(forKey: key)
+            resolutionCacheOrder.removeAll { $0 == key }
+            return nil
+        }
+        resolutionCacheOrder.removeAll { $0 == key }
+        resolutionCacheOrder.append(key)
+        return entry
+    }
+
+    private func storeCacheEntry(key: String, sources: [ResolvedSource],
+                                 negative: Bool, ttl: TimeInterval) {
+        resolutionCache[key] = CachedResolution(
+            sources: sources, expiresAt: Date().addingTimeInterval(ttl), negative: negative)
+        resolutionCacheOrder.removeAll { $0 == key }
+        resolutionCacheOrder.append(key)
+        while resolutionCacheOrder.count > Self.resolutionCacheCap {
+            let victim = resolutionCacheOrder.removeFirst()
+            resolutionCache.removeValue(forKey: victim)
+        }
+    }
+
+    /// Verify a fixture's ladder and publish it progressively
+    /// into `res`: the first verified batch is published when the
+    /// quorum (3 verified) lands, when the soft deadline passes,
+    /// or when every candidate has settled — whichever comes
+    /// first; stragglers keep verifying behind it until they
+    /// settle or the hard cap cuts them off (an unsettled
+    /// candidate counts as a transient failure). The final
+    /// ladder is the verified sources in candidate order,
+    /// followed by the blind tier (kept-blind and transient
+    /// failures, candidate order); definitively dead sources are
+    /// excluded everywhere, so a fixture whose sources all prove
+    /// dead resolves to an empty ladder and the player's
+    /// no-signal slate — the addon's serve-nothing answer.
+    private func runResolve(key: String, ladder: [Channel],
+                            into res: MatchResolution) async {
+        let started = Date()
+        var verdicts: [Int: MatchVerdict] = [:]
+        // The deadline constants are captured as locals for the
+        // sentinel tasks below: they are statics of this @MainActor
+        // type, and a @Sendable task-group child must not reach
+        // back through Self for them (the inherited-isolation
+        // failure class the Swift 6 sweep exists to catch).
+        let softDeadline = Self.resolveSoftDeadline
+        let hardCap = Self.resolveHardCap
+        await withTaskGroup(of: (Int, MatchVerdict?).self) { group in
+            for (i, ch) in ladder.enumerated() {
+                group.addTask { (i, await StreamVerifier.verify(ch)) }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(softDeadline))
+                return (-2, nil)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(hardCap))
+                return (-1, nil)
+            }
+            var presented = false
+            for await (i, verdict) in group {
+                if i == -1 { break } // hard cap: stop collecting
+                if i >= 0, let verdict { verdicts[i] = verdict }
+                if !presented {
+                    let verified = Self.verifiedSources(ladder: ladder, verdicts: verdicts)
+                    let settled = verdicts.count == ladder.count
+                    let quorum = verified.count >= Self.resolveQuorum
+                    let softPassed = Date().timeIntervalSince(started) >= Self.resolveSoftDeadline
+                    if !verified.isEmpty && (quorum || softPassed || settled) {
+                        res.publish(verified)
+                        presented = true
+                        print("[Resolve] \(key): first batch — \(verified.count) verified "
+                            + "(\(quorum ? "quorum" : settled ? "all settled" : "soft deadline"))")
+                    }
+                }
+                if verdicts.count == ladder.count { break }
+            }
+            group.cancelAll()
+        }
+        let final = Self.finalSources(ladder: ladder, verdicts: verdicts)
+        let verifiedCount = verdicts.values.filter {
+            if case .verified = $0 { return true }
+            return false
+        }.count
+        if !Task.isCancelled {
+            res.publish(final)
+            res.finish()
+            if verifiedCount > 0 {
+                let ttl = resolutionTTLs[key] ?? Self.resolveBaseTTL
+                storeCacheEntry(key: key, sources: final, negative: false, ttl: ttl)
+                resolutionTTLs[key] = min(ttl * 2, Self.resolveMaxTTL)
+            } else {
+                storeCacheEntry(key: key, sources: final, negative: true,
+                                ttl: Self.resolveNegativeTTL)
+                if let ttl = resolutionTTLs[key] {
+                    resolutionTTLs[key] = max(ttl / 2, Self.resolveBaseTTL)
+                }
+            }
+            print("[Resolve] \(key): finished — \(verifiedCount)/\(ladder.count) verified, "
+                + "ladder \(final.count)")
+        } else {
+            res.finish()
+        }
+        if let flight = resolutionInFlight[key], flight.resolution === res {
+            resolutionInFlight.removeValue(forKey: key)
+        }
+    }
+
+    /// The verified rungs so far, in candidate order.
+    private static func verifiedSources(ladder: [Channel],
+                                        verdicts: [Int: MatchVerdict]) -> [ResolvedSource] {
+        ladder.enumerated().compactMap { i, _ in
+            guard case .verified(let ch, let quality)? = verdicts[i] else { return nil }
+            return ResolvedSource(channel: ch, quality: quality, verified: true)
+        }
+    }
+
+    /// The finished ladder: verified rungs in candidate order,
+    /// then the blind tier — kept-blind and transiently failed
+    /// candidates (an unsettled one counts as transient) in
+    /// candidate order. Definitively dead rungs never appear.
+    private static func finalSources(ladder: [Channel],
+                                     verdicts: [Int: MatchVerdict]) -> [ResolvedSource] {
+        var out = verifiedSources(ladder: ladder, verdicts: verdicts)
+        for (i, ch) in ladder.enumerated() {
+            switch verdicts[i] {
+            case .verified, .dead:
+                break
+            case .keptBlind, .failedTransient, nil:
+                out.append(ResolvedSource(channel: ch, quality: nil, verified: false))
+            }
+        }
+        return out
+    }
+
     /// First load only: land on the Hot tab when it has a live match,
     /// else the highest-priority league with a live match right now;
     /// fall back to Ngoại Hạng Anh. Runs at the end of the first
@@ -478,6 +737,299 @@ final class PlaylistStore: ObservableObject {
             saveInvalidSet()
             publishFiltered()
         }
+    }
+}
+
+/// One rung of a resolved fixture ladder: the channel the player
+/// should use (a copy whose Referer was repaired during
+/// verification, when the repair is what made it pass), the
+/// quality parsed from its master playlist ("1080p", "720p50" —
+/// nil when the playlist in hand declares none), and whether it
+/// actually passed pre-flight (false = blind tier: kept or
+/// transiently failed, presented only behind verified rungs).
+struct ResolvedSource: Identifiable, Equatable {
+    let channel: Channel
+    let quality: String?
+    let verified: Bool
+    var id: String { channel.url }
+}
+
+/// A fixture's ladder being (or having been) resolved — the
+/// progressive surface the player observes. The store owns the
+/// resolve; the view only reads. `sources` is republished as
+/// verification lands (first verified batch, then the finished
+/// ladder); `finished` means nothing more will arrive.
+@MainActor
+final class MatchResolution: ObservableObject {
+    @Published private(set) var sources: [ResolvedSource] = []
+    @Published private(set) var finished = false
+
+    func publish(_ sources: [ResolvedSource]) { self.sources = sources }
+    func finish() { finished = true }
+
+    /// A finished resolution that never went through
+    /// verification — the direct path for standalone channels.
+    static func direct(_ channels: [Channel]) -> MatchResolution {
+        let r = MatchResolution()
+        r.sources = channels.map { ResolvedSource(channel: $0, quality: nil, verified: false) }
+        r.finished = true
+        return r
+    }
+
+    /// A finished resolution replayed from the resolve cache.
+    static func completed(_ sources: [ResolvedSource]) -> MatchResolution {
+        let r = MatchResolution()
+        r.sources = sources
+        r.finished = true
+        return r
+    }
+}
+
+/// The verdict of one candidate's pre-flight (StreamVerifier).
+enum MatchVerdict {
+    /// Passed every check. Carries the channel to play (its
+    /// Referer repaired, when the repair is what passed) and the
+    /// quality parsed from the master playlist, when it has one.
+    case verified(channel: Channel, quality: String?)
+    /// Refused (401/403) but no Referer was ever attached to
+    /// repair against — not proof of a dead stream (the addon's
+    /// keep rule), so it is presented unverified, behind every
+    /// verified rung.
+    case keptBlind
+    /// Network error or 5xx after the retry budget, or still
+    /// unsettled at the resolve's hard cap: verification was
+    /// inconclusive, so the rung joins the blind tier — never
+    /// the verified ladder, never the dead list.
+    case failedTransient
+    /// Definitively dead: 404/410, a fake-200 body, a takedown
+    /// slate, PNG-cloaked segments, or a refusal that stood
+    /// after the Referer repair with a Referer attached.
+    /// Excluded from the ladder and from the fallback alike.
+    case dead
+}
+
+/// Pre-flight verification of ONE candidate stream, ported from
+/// the addon's verifyStreams (src/streams.js) with its numbers:
+/// transient answers (network errors, 5xx) are retried up to 3
+/// attempts inside a 9 s total budget instead of believed; a
+/// 401/403 earns ONE retry with a repaired Referer before it may
+/// be called dead; a 200 must prove it is a playlist. Where the
+/// addon consults a learned registry of embed hosts for the
+/// repair, a client has no registry — the repair here is the
+/// stream URL's own origin ("scheme://host/"), the one Referer
+/// derivable from what the app already holds. Non-isolated like
+/// LinkProbe, and for the same reason: it is called from task
+/// groups off the main actor.
+private enum StreamVerifier {
+
+    private static let maxAttempts = 3
+    private static let totalBudget: TimeInterval = 9
+    private static let attemptTimeout: TimeInterval = 4
+    private static let sampleCap = 32_768
+    /// The user agent LinkProbe sends when an entry declares
+    /// none — the verifier and the sweep speak with one voice.
+    private static let defaultUA = "Mozilla/5.0 (Linux; Android 14; TV)"
+
+    private enum FetchOutcome {
+        case ok(sample: String)
+        case http(status: Int)
+        case transient
+    }
+
+    static func verify(_ channel: Channel) async -> MatchVerdict {
+        // Direct media files are kept blind (the addon's
+        // keep-list: it verifies playlists, not files).
+        let path = channel.url.split(separator: "?").first.map(String.init) ?? channel.url
+        if path.lowercased().hasSuffix(".mp4") { return .keptBlind }
+        guard channel.streamURL != nil else { return .dead }
+        let deadline = Date().addingTimeInterval(totalBudget)
+        var attempt = 0
+        while true {
+            attempt += 1
+            switch await fetch(channel: channel, referer: channel.referrer, origin: nil) {
+            case .ok(let sample):
+                return judge(sample: sample, channel: channel, referer: channel.referrer)
+            case .http(let status) where status == 401 || status == 403:
+                // Referer-repair: ONE retry with the host-derived
+                // Referer; re-sending the refused one verbatim
+                // would only double a dead stream's cost, so the
+                // repair is skipped when it changes nothing.
+                if let repaired = repairedReferer(for: channel.url),
+                   repaired != channel.referrer {
+                    switch await fetch(channel: channel, referer: repaired,
+                                       origin: originString(for: repaired)) {
+                    case .ok(let sample):
+                        return judge(sample: sample, channel: channel, referer: repaired)
+                    case .http:
+                        // The refusal stood through the repair.
+                        // It is genuine only when a Referer was
+                        // attached from the start; with none, the
+                        // addon's keep rule applies.
+                        return channel.referrer.isEmpty ? .keptBlind : .dead
+                    case .transient:
+                        // The repair fetch itself was inconclusive
+                        // (network error / 5xx), so the refusal was
+                        // never actually re-tested: not proof of a
+                        // dead stream — blind tier, not the grave.
+                        return .failedTransient
+                    }
+                }
+                return channel.referrer.isEmpty ? .keptBlind : .dead
+            case .http:
+                return .dead // 404/410, and any other terminal status
+            case .transient:
+                if attempt >= maxAttempts || Date() >= deadline {
+                    return .failedTransient
+                }
+                try? await Task.sleep(for: .milliseconds(400 * attempt))
+                if Task.isCancelled { return .failedTransient }
+            }
+        }
+    }
+
+    /// One bounded GET of the playlist with the stream's own
+    /// headers, returning at most the first `sampleCap` bytes —
+    /// everything the checks below need lives in the head of the
+    /// playlist.
+    private static func fetch(channel: Channel, referer: String,
+                              origin: String?) async -> FetchOutcome {
+        guard let url = URL(string: channel.url) else { return .http(status: 400) }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = attemptTimeout
+        request.setValue(channel.userAgent.isEmpty ? defaultUA : channel.userAgent,
+                         forHTTPHeaderField: "User-Agent")
+        if !referer.isEmpty { request.setValue(referer, forHTTPHeaderField: "Referer") }
+        if let origin { request.setValue(origin, forHTTPHeaderField: "Origin") }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = attemptTimeout
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+            if status == 401 || status == 403 || status == 404 || status == 410 {
+                return .http(status: status)
+            }
+            if status >= 500 { return .transient }
+            guard status == 200 else { return .http(status: status) }
+            var buffer = Data()
+            do {
+                for try await byte in bytes {
+                    buffer.append(byte)
+                    if buffer.count >= sampleCap { break }
+                }
+            } catch {
+                if buffer.isEmpty { return .transient }
+            }
+            return .ok(sample: String(decoding: buffer, as: UTF8.self))
+        } catch {
+            return .transient
+        }
+    }
+
+    /// Judge a 200 body: it must be a real playlist (a 200 whose
+    /// body is not one is the CDNs' fake-200 for an expired
+    /// token), not a takedown slate, and not PNG-cloaked. A pass
+    /// carries the winning Referer back into the channel — the
+    /// repaired headers are what the player then uses, because
+    /// PlayerController.asset already sends exactly the headers
+    /// the channel declares — plus the quality parsed from the
+    /// master playlist when this body is one.
+    private static func judge(sample: String, channel: Channel,
+                              referer: String) -> MatchVerdict {
+        guard sample.contains("#EXTM3U") else { return .dead }
+        let lower = sample.lowercased()
+        if lower.contains("takedownslate") || lower.contains("ptv_takedownslates") {
+            return .dead
+        }
+        if hasPNGSegmentLine(sample) { return .dead }
+        var channel = channel
+        if referer != channel.referrer {
+            channel = Channel(title: channel.title, logo: channel.logo,
+                              group: channel.group, url: channel.url,
+                              kickoff: channel.kickoff, leagueRank: channel.leagueRank,
+                              referrer: referer, userAgent: channel.userAgent)
+        }
+        return .verified(channel: channel, quality: parsedQuality(from: sample))
+    }
+
+    /// The addon's PNG-cloak test (a playlist line that is not a
+    /// comment and points at a .png "segment"), line-based here
+    /// instead of regex-based, same predicate.
+    private static func hasPNGSegmentLine(_ sample: String) -> Bool {
+        for raw in sample.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            let path = line.split(separator: "?").first.map(String.init) ?? line
+            if path.lowercased().hasSuffix(".png") { return true }
+        }
+        return false
+    }
+
+    /// Quality from the master playlist in hand, the addon's
+    /// rule (M3U8ParserService): the highest-BANDWIDTH variant
+    /// wins; its RESOLUTION height names the tag ("1080p", with
+    /// the frame rate appended from 45 fps up — "1080p50"); a
+    /// variant with no RESOLUTION is a generic "HD". A media
+    /// playlist (no #EXT-X-STREAM-INF) declares nothing, so the
+    /// quality stays nil rather than inventing a tier — the
+    /// addon equally refuses to let a media playlist's generic
+    /// tag stand as measured quality.
+    private static func parsedQuality(from sample: String) -> String? {
+        guard sample.contains("#EXT-X-STREAM-INF") else { return nil }
+        var bestBandwidth = -1
+        var bestTag: String? = nil
+        for raw in sample.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix("#EXT-X-STREAM-INF") else { continue }
+            let bandwidth = attribute("BANDWIDTH", in: line).flatMap { Int($0) } ?? 0
+            guard bandwidth > bestBandwidth else { continue }
+            bestBandwidth = bandwidth
+            var tag = "HD"
+            if let resolution = attribute("RESOLUTION", in: line),
+               let height = resolution.split(separator: "x").last.flatMap({ Int($0) }) {
+                tag = "\(height)p"
+                if let rate = attribute("FRAME-RATE", in: line).flatMap({ Double($0) }),
+                   rate >= 45 {
+                    tag += "\(Int(rate.rounded()))"
+                }
+            }
+            bestTag = tag
+        }
+        return bestTag
+    }
+
+    /// One attribute of an #EXT-X-STREAM-INF line. The key must
+    /// start an attribute (preceded by ':' or ',') so that e.g.
+    /// "BANDWIDTH" never matches inside "AVERAGE-BANDWIDTH".
+    private static func attribute(_ key: String, in line: String) -> String? {
+        var searchFrom = line.startIndex
+        while let hit = line.range(of: key + "=", range: searchFrom..<line.endIndex) {
+            let before = line[..<hit.lowerBound].last
+            if before == ":" || before == "," {
+                let rest = line[hit.upperBound...]
+                let value = rest.split(separator: ",", maxSplits: 1).first.map(String.init) ?? ""
+                return value.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+            }
+            searchFrom = hit.upperBound
+        }
+        return nil
+    }
+
+    /// The repaired Referer for a refused stream: its own
+    /// origin, root path — the one Referer derivable from the
+    /// URL itself (the addon's registry-and-regex chain, reduced
+    /// to what a client can know).
+    private static func repairedReferer(for urlString: String) -> String? {
+        guard let c = URLComponents(string: urlString),
+              let scheme = c.scheme, let host = c.host else { return nil }
+        return "\(scheme)://\(host)/"
+    }
+
+    private static func originString(for referer: String) -> String? {
+        guard let c = URLComponents(string: referer),
+              let scheme = c.scheme, let host = c.host else { return nil }
+        return "\(scheme)://\(host)"
     }
 }
 
