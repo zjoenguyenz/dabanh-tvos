@@ -866,7 +866,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.4.1")
+            Text("Đá Banh TV v1.4.2")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }

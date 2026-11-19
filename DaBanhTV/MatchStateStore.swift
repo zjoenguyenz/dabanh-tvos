@@ -1,8 +1,9 @@
 import Foundation
 
-/// Live match states (Đá Banh TV 1.4.1, BOARD-REDESIGN-PLAN §1):
+/// Live match states (Đá Banh TV 1.4.2, BOARD-REDESIGN-PLAN §1):
 /// ESPN primary (full cluster per league-day) > FotMob fallback >
-/// LiveScore third (score + minute only) > bounded computed clock.
+/// Flashscore (score + status only, no minute, no incidents) >
+/// LiveScore (score + minute only) > bounded computed clock.
 /// Matching is the apps' existing normalised pair-key + ICT date
 /// agreement, fail closed: a state binds to a fixture only when the
 /// pair matches AND the calendar dates agree (the ESPN US-Eastern
@@ -24,7 +25,7 @@ enum MatchStatus: Equatable, Sendable {
 }
 
 enum MatchSource: Equatable, Sendable {
-    case espn, fotmob, livescore
+    case espn, fotmob, flashscore, livescore
 }
 
 /// One goal or card event of a matched fixture.
@@ -138,6 +139,12 @@ enum MatchPairKey {
         "servette geneve": "servette",
         "vitoria ba": "vitoria",
         "koge": "hb koge",
+        // Measured 2026-11-19 (Flashscore/ESPN Brazil feeds write
+        // the club three ways; the mirror writes "Bragantino"):
+        "rb bragantino": "bragantino",
+        "red bull bragantino": "bragantino",
+        "bragantino sp": "bragantino",
+        "vitoria salvador ba": "vitoria",
     ]
 
     /// One team name canonicalised (matcher v2's canonical_team).
@@ -244,10 +251,14 @@ final class MatchStateStore: ObservableObject {
 
     // MARK: - Bounded computed clock (plan §1.6, fallback only)
 
-    /// HT-aware computed minute for an unmatched fixture: elapsed
-    /// ≤ 45 shows elapsed; 45–60 shows HT; past 60 shows elapsed
-    /// − 15; the estimate freezes at "90+'" once it passes 100.
-    /// No score is ever computed.
+    /// Computed minute for an unmatched fixture: elapsed ≤ 45
+    /// shows elapsed; 46–60 shows first-half added time
+    /// ("45'+N", N = elapsed − 45) — half time is NEVER computed,
+    /// it is shown only when a source reports the HT status
+    /// (RC5, 2026-11-19: the old 45–60 → HT window declared the
+    /// break up to 15 min early whenever the first half ran long);
+    /// past 60 shows elapsed − 15; the estimate freezes at "90+'"
+    /// once it passes 100. No score is ever computed.
     /// Pure date arithmetic — `nonisolated` because the view
     /// layer (TVFixtureEntry, a plain struct) reads it from
     /// non-isolated contexts; the class's @MainActor isolation
@@ -257,7 +268,7 @@ final class MatchStateStore: ObservableObject {
         let elapsed = Int(now.timeIntervalSince(kickoff) / 60)
         if elapsed < 0 { return nil }
         if elapsed <= 45 { return "\(max(1, elapsed))'" }
-        if elapsed <= 60 { return "NGHỈ GIỮA HIỆP" }
+        if elapsed <= 60 { return "45'+\(elapsed - 45)'" }
         let shown = elapsed - 15
         if shown > 100 { return "90+'" }
         return "\(shown)'"
@@ -275,11 +286,12 @@ final class MatchStateStore: ObservableObject {
         let days = (0...1).map { Self.espnDayString(now.addingTimeInterval(TimeInterval($0 * 86400))) }
         let todayICT = Self.ictDateKey(now)
         async let espnStates = Self.fetchESPN(slugs: CompetitionID.espnSlugs, days: days)
-        async let fotmobStates = Self.fetchFotMob(day: Self.fotmobDayString(now))
+        async let fotmobStates = Self.fetchFotMobMerged(now: now)
+        async let flashscoreStates = Self.fetchFlashscore()
         async let livescoreStates = Self.fetchLiveScore(todayKey: todayICT)
-        let layers = await [espnStates, fotmobStates, livescoreStates]
+        let layers = await [espnStates, fotmobStates, flashscoreStates, livescoreStates]
 
-        // Precedence ESPN > FotMob > LiveScore, wholesale per
+        // Precedence ESPN > FotMob > Flashscore > LiveScore, wholesale per
         // fixture key (plan §1.4): a lower layer never overwrites
         // a key a higher layer produced.
         var merged: [String: MatchState] = [:]
@@ -336,9 +348,30 @@ final class MatchStateStore: ObservableObject {
         return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
-    /// "YYYY-MM-DD" for FotMob's date= parameter, read in ICT.
-    nonisolated private static func fotmobDayString(_ date: Date) -> String {
-        let c = ictCalendar().dateComponents([.year, .month, .day], from: date)
+    /// The app's own local calendar (owner timezone ruling
+    /// 2026-11-19: every app runs on the Oklahoma timezone,
+    /// America/Chicago; only iOS follows the device location).
+    /// Used ONLY to choose which source day-files to fetch —
+    /// never for binding keys, which stay on the playlist's ICT
+    /// stamp convention (FixtureGrouping.stampDateKey).
+    nonisolated private static func appCalendar() -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/Chicago") ?? .current
+        return cal
+    }
+
+    /// UTC calendar — FotMob files its day feeds under the UTC
+    /// date, not the reader's local date.
+    nonisolated private static func utcCalendar() -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+        return cal
+    }
+
+    /// "YYYY-MM-DD" for FotMob's date= parameter, the date read
+    /// in the given calendar.
+    nonisolated private static func fotmobDayString(_ date: Date, calendar: Calendar) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
@@ -357,10 +390,11 @@ final class MatchStateStore: ObservableObject {
 
     // MARK: - HTTP
 
-    nonisolated private static func get(_ url: URL) async -> Data? {
+    nonisolated private static func get(_ url: URL, headers: [String: String] = [:]) async -> Data? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("Mozilla/5.0 (Linux; Android 14; TV)", forHTTPHeaderField: "User-Agent")
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         let session = URLSession(configuration: config)
@@ -526,6 +560,33 @@ final class MatchStateStore: ObservableObject {
         let leagues: [League]?
     }
 
+    /// RC1 (2026-11-19): FotMob files matches under the UTC
+    /// date, so a single local-date feed silently misses the
+    /// matches filed under the neighbouring UTC day — the old
+    /// code fetched only the ICT date, which sits a day ahead
+    /// of Oklahoma during US-evening hours, and the whole layer
+    /// came back empty. Fetch BOTH the UTC filing date and the
+    /// app's local date (America/Chicago, owner timezone ruling
+    /// 2026-11-19) and merge; when the two dates coincide the
+    /// set holds one day and only one request is made. Dedupe
+    /// is by storage key (pair key + dateKey), and each state's
+    /// dateKey still derives from the match's own kickoff
+    /// instant in the playlist's ICT stamp form — the date=
+    /// parameter only chooses which of FotMob's files are read,
+    /// never how a state binds.
+    nonisolated private static func fetchFotMobMerged(now: Date) async -> [String: MatchState] {
+        let utcDay = fotmobDayString(now, calendar: utcCalendar())
+        let localDay = fotmobDayString(now, calendar: appCalendar())
+        let days = utcDay == localDay ? [utcDay] : [utcDay, localDay]
+        var out: [String: MatchState] = [:]
+        for day in days {
+            for (key, state) in await fetchFotMob(day: day) where out[key] == nil {
+                out[key] = state
+            }
+        }
+        return out
+    }
+
     nonisolated private static func fetchFotMob(day: String) async -> [String: MatchState] {
         guard let url = URL(string: "https://www.fotmob.com/api/data/matches?date=\(day)"),
               let data = await get(url),
@@ -606,7 +667,91 @@ final class MatchStateStore: ObservableObject {
         return out
     }
 
-    // MARK: - LiveScore (third layer, score + minute only)
+    // MARK: - Flashscore (third layer, score + status only)
+
+    /// Flashscore root day feed (probe 2026-11-19,
+    /// source-probe-20261119/EVALUATION.md): records separated
+    /// by "~", fields "KEY÷value" separated by "¬". League
+    /// headers carry "ZA÷<COUNTRY: League>"; match records
+    /// start "AA÷<id>". Field semantics derived from
+    /// fs_feed1.txt cross-checked against the second pull
+    /// fsnap2/fs.txt and the known live results (Vasco 1–0
+    /// Internacional, Vitória 2–0 Bragantino — both 22:30 UTC
+    /// kickoffs, live at pull time):
+    ///   AD = kickoff epoch seconds (1795127400 = 2026-11-19
+    ///   22:30 UTC for both Brazil fixtures, matching ESPN);
+    ///   AE/AF = home/away names; AG/AH = home/away score,
+    ///   present only once a match has started (9 of 403
+    ///   records: the 5 live + the 4 finished-with-result;
+    ///   AT/AU duplicate AG/AH in every one and are ignored);
+    ///   (AB, AC) stage pair: (1,1) not started — 389 records,
+    ///   no score fields; (2,12) live — exactly the 5 in-play
+    ///   records; (3,3) finished — 4 records, scores present;
+    ///   (3,4)/(3,5) closed WITHOUT a result — no AG/AH, so
+    ///   never .ft; the probe cannot separate postponed from
+    ///   cancelled there, so both take .postponed (no badge, no
+    ///   score — the fail-closed outcome). The sample holds NO
+    ///   half-time code (every live record was first-half), so
+    ///   this layer never emits .ht. AX is NOT a status field
+    ///   (one live record carries AX=0) and is ignored; the
+    ///   feed carries no minute at all (zero field changes
+    ///   between pulls — the site computes its clock
+    ///   client-side), so minuteText stays nil and the bounded
+    ///   computed clock fills the badge. Unknown (AB, AC) pairs
+    ///   and live/finished records without a parseable score
+    ///   are skipped: one bad record never kills the feed and
+    ///   nothing is ever guessed. Binding is the same pair-key
+    ///   + ICT stamp dateKey discipline as ESPN/FotMob (the
+    ///   dateKey derives from the record's own kickoff instant).
+    nonisolated private static func fetchFlashscore() async -> [String: MatchState] {
+        guard let url = URL(string: "https://www.flashscore.com/x/feed/f_1_0_3_en_1"),
+              let data = await get(url, headers: ["x-fsign": "SW9D1eZo"]),
+              let text = String(data: data, encoding: .utf8) else { return [:] }
+        var out: [String: MatchState] = [:]
+        var leagueHeader: String? = nil
+        for record in text.split(separator: "~", omittingEmptySubsequences: true) {
+            var fields: [String: String] = [:]
+            for part in record.split(separator: "¬", omittingEmptySubsequences: true) {
+                guard let cut = part.firstIndex(of: "÷") else { continue }
+                let key = String(part[part.startIndex..<cut])
+                let value = String(part[part.index(after: cut)...])
+                fields[key] = value
+            }
+            if let header = fields["ZA"] { leagueHeader = header; continue }
+            guard fields["AA"] != nil,
+                  let homeName = fields["AE"], let awayName = fields["AF"],
+                  let kickoffEpoch = fields["AD"].flatMap({ Int($0) }),
+                  let pair = MatchPairKey.key(home: homeName, away: awayName)
+            else { continue }
+            let status: MatchStatus
+            switch (fields["AB"], fields["AC"]) {
+            case ("1", "1"): status = .pre
+            case ("2", "12"): status = .live
+            case ("3", "3"): status = .ft
+            case ("3", "4"), ("3", "5"): status = .postponed
+            default: continue
+            }
+            var sh: Int? = nil, sa: Int? = nil
+            if status == .live || status == .ft {
+                guard let h = fields["AG"].flatMap({ Int($0) }),
+                      let a = fields["AH"].flatMap({ Int($0) }) else { continue }
+                sh = h; sa = a
+            }
+            let kickoff = Date(timeIntervalSince1970: TimeInterval(kickoffEpoch))
+            let state = MatchState(
+                pairKey: pair, dateKey: FixtureGrouping.stampDateKey(of: kickoff),
+                competition: leagueHeader.flatMap { CompetitionID(flashscoreLeague: $0) },
+                status: status, minuteText: nil,
+                scoreHome: sh, scoreAway: sa,
+                htHome: nil, htAway: nil, events: [],
+                source: .flashscore, fetchedAt: Date(),
+                kickoff: kickoff, fotmobID: nil)
+            out[state.storageKey] = state
+        }
+        return out
+    }
+
+    // MARK: - LiveScore (fourth layer, score + minute only)
 
     private struct LiveScoreFeed: Decodable {
         struct Stage: Decodable {

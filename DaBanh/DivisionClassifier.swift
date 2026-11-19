@@ -34,6 +34,7 @@ enum CompetitionID: String, Equatable, Sendable {
     case ligue2 = "fra.2"
     case bundesliga = "ger.1"
     case bundesliga2 = "ger.2"
+    case serieABrazil = "bra.1"
     case championsLeague = "uefa.champions"
     case europaLeague = "uefa.europa"
     case conferenceLeague = "uefa.europa.conf"
@@ -62,6 +63,7 @@ enum CompetitionID: String, Equatable, Sendable {
         case ("Ligue 2", "FRA"): self = .ligue2
         case ("Bundesliga", "GER"): self = .bundesliga
         case ("2. Bundesliga", "GER"): self = .bundesliga2
+        case ("Serie A", "BRA"): self = .serieABrazil
         case ("UEFA Champions League", _), ("Champions League", "INT"): self = .championsLeague
         case ("UEFA Europa League", _), ("Europa League", "INT"): self = .europaLeague
         case ("UEFA Conference League", _), ("Conference League", "INT"): self = .conferenceLeague
@@ -72,12 +74,48 @@ enum CompetitionID: String, Equatable, Sendable {
         }
     }
 
+    /// Flashscore league identity from the day feed's "ZA"
+    /// header ("COUNTRY: League") — EXACT match only, never a
+    /// substring ("ENGLAND: Premier League Cup" must not file
+    /// as the Premier League). Headers verified verbatim in
+    /// the 2026-11-19 probe feed (fs_feed1.txt): "BRAZIL:
+    /// Serie A", "SPAIN: LaLiga", "SPAIN: LaLiga2", "ITALY:
+    /// Serie B", "FRANCE: Ligue 1", "FRANCE: Ligue 2",
+    /// "GERMANY: Bundesliga", "GERMANY: 2. Bundesliga",
+    /// "EUROPE: UEFA Champions League Women - League phase".
+    /// The remaining rows follow the feed's own naming pattern
+    /// for the competitions this app covers; a header matching
+    /// nothing files nil, exactly like an unknown FotMob
+    /// league — identification is never guessed.
+    init?(flashscoreLeague header: String) {
+        switch header {
+        case "ENGLAND: Premier League": self = .premierLeague
+        case "ENGLAND: Championship": self = .championship
+        case "SPAIN: LaLiga": self = .laLiga
+        case "SPAIN: LaLiga2": self = .segunda
+        case "ITALY: Serie A": self = .serieA
+        case "ITALY: Serie B": self = .serieB
+        case "FRANCE: Ligue 1": self = .ligue1
+        case "FRANCE: Ligue 2": self = .ligue2
+        case "GERMANY: Bundesliga": self = .bundesliga
+        case "GERMANY: 2. Bundesliga": self = .bundesliga2
+        case "BRAZIL: Serie A": self = .serieABrazil
+        case "EUROPE: UEFA Champions League": self = .championsLeague
+        case "EUROPE: UEFA Europa League": self = .europaLeague
+        case "EUROPE: UEFA Conference League": self = .conferenceLeague
+        case "EUROPE: UEFA Champions League Women",
+             "EUROPE: UEFA Champions League Women - League phase":
+            self = .womensChampionsLeague
+        default: return nil
+        }
+    }
+
     /// The ESPN slugs the live-state store polls (plan §3.4: all
     /// verified HTTP 200 with full details on 2026-11-19), plus
     /// the UWCL slug family the cup area needs (plan §2.4).
     static let espnSlugs: [String] = [
         "eng.1", "eng.2", "esp.1", "esp.2", "ita.1", "ita.2",
-        "fra.1", "fra.2", "ger.1", "ger.2",
+        "fra.1", "fra.2", "ger.1", "ger.2", "bra.1",
         "uefa.champions", "uefa.europa", "uefa.europa.conf",
         "uefa.womens.champions",
     ]
@@ -91,6 +129,13 @@ enum CompetitionID: String, Equatable, Sendable {
         case .serieA, .serieB: return 3
         case .ligue1, .ligue2: return 4
         case .bundesliga, .bundesliga2: return 5
+        // Brazil has no country tab of its own: LeagueClassifier
+        // files its fixtures under Khác (rank 9). The rank must
+        // NOT be nil — nil is exactly what isCup tests, and a
+        // Brazilian league fixture must never file as a European
+        // cup fixture. Rank 9 keeps isCup/isLower false and the
+        // lower/top lookups nil, so filing is unchanged.
+        case .serieABrazil: return 9
         case .championsLeague, .europaLeague, .conferenceLeague,
              .womensChampionsLeague: return nil
         }
@@ -118,6 +163,7 @@ enum CompetitionID: String, Equatable, Sendable {
         case .ligue2: return "LIGUE 2"
         case .bundesliga: return "BUNDESLIGA"
         case .bundesliga2: return "2. BUNDESLIGA"
+        case .serieABrazil: return "SERIE A BRAZIL"
         case .championsLeague: return "CÚP C1 · CHAMPIONS LEAGUE"
         case .europaLeague: return "CÚP C2 · EUROPA LEAGUE"
         case .conferenceLeague: return "CÚP C3 · CONFERENCE LEAGUE"
