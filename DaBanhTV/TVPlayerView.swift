@@ -149,12 +149,15 @@ private struct PlayerController: UIViewControllerRepresentable {
     }
 
     /// The asset carries exactly the headers the entry itself
-    /// declared (#EXTVLCOPT) — nothing invented, nothing blanket.
+    /// declared (#EXTVLCOPT for playlist entries; the addon's
+    /// proxyHeaders for Nuvio ladder channels) — nothing
+    /// invented, nothing blanket.
     static func asset(for channel: Channel) -> AVURLAsset {
         let url = channel.streamURL ?? URL(fileURLWithPath: "/dev/null")
         var headers: [String: String] = [:]
         if !channel.userAgent.isEmpty { headers["User-Agent"] = channel.userAgent }
         if !channel.referrer.isEmpty { headers["Referer"] = channel.referrer }
+        if !channel.origin.isEmpty { headers["Origin"] = channel.origin }
         if headers.isEmpty { return AVURLAsset(url: url) }
         return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }

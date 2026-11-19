@@ -20,9 +20,16 @@ struct Channel: Identifiable, Equatable {
     /// uninvited Referer turns other hosts' segment fetches into 403.
     let referrer: String
     let userAgent: String
+    /// ADDITIVE (2026-11-19, Nuvio addon integration): the
+    /// Origin header a stream's proxyHeaders declare, carried
+    /// so pre-flight and the player can send it. Every
+    /// pre-existing construction (M3U parser, playlist code)
+    /// leaves it empty and behaves exactly as before; only
+    /// addon-built ladder channels set it.
+    let origin: String
 
     init(title: String, logo: String, group: String, url: String, kickoff: Date?, leagueRank: Int,
-         referrer: String = "", userAgent: String = "") {
+         referrer: String = "", userAgent: String = "", origin: String = "") {
         self.title = title
         self.logo = logo
         self.group = group
@@ -31,6 +38,7 @@ struct Channel: Identifiable, Equatable {
         self.leagueRank = leagueRank
         self.referrer = referrer
         self.userAgent = userAgent
+        self.origin = origin
     }
 
     var streamURL: URL? { URL(string: url) }

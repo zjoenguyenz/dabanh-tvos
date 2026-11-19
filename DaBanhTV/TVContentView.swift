@@ -28,6 +28,11 @@ import SwiftUI
 ///   are filtered out of every fixture list and the featured rail.
 struct TVContentView: View {
     @EnvironmentObject private var store: PlaylistStore
+    /// The Nuvio addon's content for the BLV Anh tab (2026-11-19):
+    /// a store of its own, read ONLY by the EN section — the
+    /// fixture tabs never see it, so addon content cannot leak
+    /// into them.
+    @StateObject private var nuvio = NuvioStore()
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
     @State private var heroItem: HeroItem?
@@ -47,6 +52,7 @@ struct TVContentView: View {
     private enum HeroItem {
         case fixture(TVFixtureEntry)
         case english(Channel)
+        case nuvio(NuvioItem)
     }
 
     // MARK: - Data (fixture lists never contain EN channels)
@@ -144,6 +150,7 @@ struct TVContentView: View {
             .padding(.bottom, 28)
         }
         .task { await store.start() }
+        .task { await nuvio.load() }
         .task(id: muPinEntry?.id) {
             // Pre-resolve the pinned Manchester United fixture
             // (2026-11-19): when a pin exists, its sources are
@@ -163,6 +170,7 @@ struct TVContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await store.refreshIfStale() }
+                Task { await nuvio.refreshIfStale() }
             }
         }
         .fullScreenCover(item: $playRequest) { request in
@@ -175,6 +183,9 @@ struct TVContentView: View {
         .onChange(of: store.selectedLeague) { _, _ in syncHero() }
         .onChange(of: store.channels) { _, _ in syncHero() }
         .onChange(of: store.hotChannels) { _, _ in syncHero() }
+        .onChange(of: nuvio.liveEvents) { _, _ in syncHero() }
+        .onChange(of: nuvio.upcomingEvents) { _, _ in syncHero() }
+        .onChange(of: nuvio.channels) { _, _ in syncHero() }
     }
 
     /// Focus key → hero content, for every focusable card on screen.
@@ -183,13 +194,26 @@ struct TVContentView: View {
         for entry in featuredEntries { map["feat:" + entry.id] = .fixture(entry) }
         for entry in entries { map["rail:" + entry.id] = .fixture(entry) }
         for ch in enChannels { map["en:" + ch.url] = .english(ch) }
+        for item in nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels {
+            map["nv:" + item.id] = .nuvio(item)
+        }
         return map
     }
 
     private func syncHero() {
         if isENTab {
-            if case .english(let ch) = heroItem, enChannels.contains(ch) { return }
-            heroItem = enChannels.first.map { .english($0) }
+            // The addon leads the tab, so the hero defaults to
+            // its first item; the old EN block is the fallback
+            // hero when the addon has nothing.
+            if case .nuvio(let item) = heroItem,
+               (nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels).contains(item) { return }
+            if case .english(let ch) = heroItem, enChannels.contains(ch),
+               !nuvio.hasContent { return }
+            if let first = nuvio.liveEvents.first ?? nuvio.upcomingEvents.first ?? nuvio.channels.first {
+                heroItem = .nuvio(first)
+            } else {
+                heroItem = enChannels.first.map { .english($0) }
+            }
             return
         }
         if case .fixture(let current) = heroItem,
@@ -229,7 +253,7 @@ struct TVContentView: View {
 
     private var countText: String {
         if isENTab {
-            return "\(enChannels.count) kênh tiếng Anh"
+            return "\(nuvio.totalCount + enChannels.count) kênh tiếng Anh"
         }
         if store.selectedLeague == PlaylistStore.liveTabValue {
             return "\(entries.count) trận đang đá"
@@ -267,7 +291,10 @@ struct TVContentView: View {
                 // a lone button in the header row above, tvOS spatial
                 // focus could not reach it from the pills (owner, v1.1).
                 Button {
-                    Task { await store.refresh() }
+                    Task {
+                        await store.refresh()
+                        await nuvio.refresh()
+                    }
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "arrow.clockwise")
@@ -305,7 +332,7 @@ struct TVContentView: View {
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:check")
                 .disabled(store.isLoading || store.isValidating)
-                if !enChannels.isEmpty {
+                if !enChannels.isEmpty || nuvio.hasContent {
                     tabPill(title: "🌍 EN · BLV Anh", value: Self.enTabValue)
                 }
             }
@@ -402,7 +429,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.3.7")
+            Text("Đá Banh TV v1.3.8")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -410,53 +437,131 @@ struct TVContentView: View {
 
     // MARK: - EN section
 
-    /// The English-commentary section: the hero follows focus across
-    /// the channel rail exactly like it does across the match rails,
-    /// and each channel is a plain playable card — no fixture
-    /// grouping, no kickoff, no ladder.
+    /// The English-commentary section (owner, clarified
+    /// 2026-11-19): the Nuvio addon's content LEADS — its live
+    /// events, upcoming events and 24/7 channels in that order —
+    /// and the old mirror EN block renders BELOW as its own
+    /// section, the fallback that keeps the tab alive when the
+    /// addon is down. The hero follows focus across every rail
+    /// exactly like it does across the match rails; old-block
+    /// channels are plain playable cards (no fixture grouping,
+    /// no ladder), addon items resolve through the addon store.
     @ViewBuilder
     private var enBody: some View {
-        if enChannels.isEmpty {
+        if enChannels.isEmpty && !nuvio.hasContent {
             Spacer()
-            Text("Chưa có kênh tiếng Anh nào trong danh sách hiện tại.")
-                .font(.title3)
-                .foregroundStyle(.white.opacity(0.7))
+            if nuvio.isLoading || store.isLoading {
+                ProgressView("Đang tải danh sách…")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .tint(.white)
+            } else {
+                Text("Chưa có kênh tiếng Anh nào trong danh sách hiện tại.")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
             Spacer()
         } else {
             VStack(alignment: .leading, spacing: 22) {
                 heroPanel
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 30) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH")
-                                .font(.system(size: 30, weight: .bold))
-                                .foregroundStyle(.white)
-                            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
-                                .font(.system(size: 22))
-                                .foregroundStyle(.white.opacity(0.6))
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(spacing: 28) {
-                                    ForEach(enChannels) { ch in
-                                        Button {
-                                            playRequest = PlayRequest(resolution: store.resolution(for: ch))
-                                        } label: {
-                                            TVENChannelCard(
-                                                channel: ch,
-                                                focused: focusedKey == "en:" + ch.url)
-                                        }
-                                        .tvCardButton()
-                                        .focused($focusedKey, equals: "en:" + ch.url)
-                                    }
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 16)
-                            }
+                        if !nuvio.liveEvents.isEmpty {
+                            nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", nuvio.liveEvents)
+                        }
+                        if !nuvio.upcomingEvents.isEmpty {
+                            nuvioEventRail("⏰  NUVIO · SẮP ĐÁ", nuvio.upcomingEvents)
+                        }
+                        if !nuvio.channels.isEmpty {
+                            nuvioChannelRail(nuvio.channels)
+                        }
+                        if !enChannels.isEmpty {
+                            oldENBlock
                         }
                         footerRow
                     }
                     .padding(.top, 2)
                     .padding(.bottom, 10)
                 }
+            }
+        }
+    }
+
+    private func nuvioEventRail(_ title: String, _ items: [NuvioItem]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(items) { item in
+                        Button {
+                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                        } label: {
+                            NuvioEventCard(item: item, focused: focusedKey == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focusedKey, equals: "nv:" + item.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+    }
+
+    private func nuvioChannelRail(_ items: [NuvioItem]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("📺  NUVIO · KÊNH 24/7")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            Text("Kênh tiếng Anh từ addon Nuvio — phát liên tục.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(items) { item in
+                        Button {
+                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                        } label: {
+                            NuvioChannelCard(item: item, focused: focusedKey == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focusedKey, equals: "nv:" + item.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+    }
+
+    /// The old mirror EN block, unchanged but for its place:
+    /// below the addon sections, as the fallback pool.
+    private var oldENBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(enChannels) { ch in
+                        Button {
+                            playRequest = PlayRequest(resolution: store.resolution(for: ch))
+                        } label: {
+                            TVENChannelCard(
+                                channel: ch,
+                                focused: focusedKey == "en:" + ch.url)
+                        }
+                        .tvCardButton()
+                        .focused($focusedKey, equals: "en:" + ch.url)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
             }
         }
     }
@@ -470,8 +575,113 @@ struct TVContentView: View {
             fixtureHero(entry)
         case .english(let ch):
             englishHero(ch)
+        case .nuvio(let item):
+            nuvioHero(item)
         case nil:
             EmptyView()
+        }
+    }
+
+    /// The hero for an addon item, in the englishHero layout:
+    /// a kind badge, the headline, the league/source meta,
+    /// crest-vs-crest art for events with teams (the addon's
+    /// own badges) or the channel art for 24/7 channels.
+    private func nuvioHero(_ item: NuvioItem) -> some View {
+        let heroFocused = focusedKey == "heroNV:" + item.id
+        return Button {
+            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+        } label: {
+            HStack(alignment: .center, spacing: 36) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(nuvioHeroBadge(item))
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(nuvioHeroBadgeColor(item)))
+                    Text(item.headline)
+                        .font(.system(size: 46, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text(nuvioHeroMeta(item))
+                        .font(.system(size: 24))
+                        .foregroundStyle(TVPalette.heroMeta)
+                        .lineLimit(1)
+                    HStack(spacing: 10) {
+                        Text("Xem ngay")
+                            .font(.system(size: 24, weight: .semibold))
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 19))
+                    }
+                    .foregroundStyle(TVPalette.cyan)
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 10)
+                    .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
+                    .padding(.top, 4)
+                }
+                .frame(width: 1020, alignment: .leading)
+                nuvioHeroArt(item)
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 28)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 26)
+                    .fill(LinearGradient(
+                        colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 26)
+                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
+                                          lineWidth: heroFocused ? 4 : 1.5)))
+        }
+        .tvCardButton()
+        .focused($focusedKey, equals: "heroNV:" + item.id)
+    }
+
+    private func nuvioHeroBadge(_ item: NuvioItem) -> String {
+        switch item.kind {
+        case .liveEvent: return "🔴 ĐANG ĐÁ · NUVIO"
+        case .upcomingEvent:
+            if let kickoff = item.kickoff {
+                return "⏰ " + TVKickoffFormat.timeDay.string(from: kickoff)
+            }
+            return "⏰ SẮP ĐÁ · NUVIO"
+        case .channel: return "📺 NUVIO · KÊNH 24/7"
+        }
+    }
+
+    private func nuvioHeroBadgeColor(_ item: NuvioItem) -> Color {
+        item.kind == .liveEvent ? TVPalette.liveRed : TVPalette.tealFill
+    }
+
+    private func nuvioHeroMeta(_ item: NuvioItem) -> String {
+        var parts: [String] = []
+        if let league = item.league { parts.append(league) }
+        parts.append(item.kind == .channel
+            ? "Kênh tiếng Anh · phát liên tục"
+            : "Trận đấu qua addon Nuvio")
+        return parts.joined(separator: "  ·  ")
+    }
+
+    @ViewBuilder
+    private func nuvioHeroArt(_ item: NuvioItem) -> some View {
+        if item.teams != nil {
+            HStack(spacing: 22) {
+                TVCrestImage(url: item.team1Logo.flatMap(URL.init(string:)), size: 160)
+                Text("VS")
+                    .font(.system(size: 30, weight: .heavy))
+                    .foregroundStyle(.white.opacity(0.85))
+                TVCrestImage(url: item.team2Logo.flatMap(URL.init(string:)), size: 160)
+            }
+            .frame(width: 440, alignment: .center)
+        } else if !item.poster.isEmpty {
+            TVChannelLogo(channel: item.displayChannel, height: 168)
+                .frame(width: 440, height: 168)
+        } else {
+            TVSoccerPlaceholder(size: 110)
+                .frame(width: 440, height: 168)
         }
     }
 

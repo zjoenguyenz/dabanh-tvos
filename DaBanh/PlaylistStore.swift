@@ -820,7 +820,11 @@ enum MatchVerdict {
 /// derivable from what the app already holds. Non-isolated like
 /// LinkProbe, and for the same reason: it is called from task
 /// groups off the main actor.
-private enum StreamVerifier {
+/// Internal rather than private since 2026-11-19: the tvOS
+/// target's Nuvio addon store (DaBanhTV/NuvioAddon.swift)
+/// verifies its addon ladders through this same verifier —
+/// one judge for every ladder the player can receive.
+enum StreamVerifier {
 
     private static let maxAttempts = 3
     private static let totalBudget: TimeInterval = 9
@@ -846,7 +850,8 @@ private enum StreamVerifier {
         var attempt = 0
         while true {
             attempt += 1
-            switch await fetch(channel: channel, referer: channel.referrer, origin: nil) {
+            switch await fetch(channel: channel, referer: channel.referrer,
+                               origin: channel.origin.isEmpty ? nil : channel.origin) {
             case .ok(let sample):
                 return judge(sample: sample, channel: channel, referer: channel.referrer)
             case .http(let status) where status == 401 || status == 403:
@@ -948,7 +953,8 @@ private enum StreamVerifier {
             channel = Channel(title: channel.title, logo: channel.logo,
                               group: channel.group, url: channel.url,
                               kickoff: channel.kickoff, leagueRank: channel.leagueRank,
-                              referrer: referer, userAgent: channel.userAgent)
+                              referrer: referer, userAgent: channel.userAgent,
+                              origin: channel.origin)
         }
         return .verified(channel: channel, quality: parsedQuality(from: sample))
     }

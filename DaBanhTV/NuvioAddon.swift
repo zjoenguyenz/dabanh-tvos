@@ -1,0 +1,800 @@
+import Foundation
+import SwiftUI
+
+/// Nuvio Live Sports as a source INSIDE the BLV Anh tab
+/// (owner, clarified 2026-11-19 10:11 CST).
+///
+/// What he asked for, exactly: the BLV Anh tab used to show only
+/// the OLD source's fixed channels (the mirror's "EN · BLV Anh"
+/// block). The channels and fixtures of the item-5 addon —
+/// Nuvio Live Sports, public instance https://nuviosports.xyz —
+/// now LEAD this tab: its live events, its upcoming events and
+/// its 24/7 channels render first, in this screen's existing
+/// rail/card idiom, and the old EN block stays BELOW them as the
+/// fallback, so the tab never goes empty when the addon is down.
+/// Nothing addon-sourced appears anywhere else: the store below
+/// is a separate object the fixture tabs never read, and the
+/// ladder channels it builds carry the EN group name, so the
+/// existing English exclusion (TVEnglish / LeagueClassifier)
+/// treats them as English-block content wherever they could
+/// ever surface.
+///
+/// The addon speaks the Stremio shapes the hunt verified
+/// (tv-build/sports-provider-hunt-20261117/HUNT-REPORT.md +
+/// PL-CHECK.md, re-probed live 2026-11-19):
+///   {base}/manifest.json
+///   {base}/catalog/tv/{id}.json, paged as
+///   {base}/catalog/tv/{id}/skip={n}.json   (page size 100;
+///   the ?skip= query form does NOT page — verified live)
+///   {base}/stream/tv/{id}.json
+/// Stream entries carry behaviorHints.proxyHeaders.request
+/// (Referer / User-Agent / Origin), applied to pre-flight AND
+/// to the player via the Channel the ladder is built from.
+/// Entries with no `url` (the addon's donation row is one) are
+/// unplayable by construction and are dropped at parse time.
+///
+/// Playback verification reuses the 1.3.7 machinery where it
+/// fits: StreamVerifier (PlaylistStore.swift — its access was
+/// widened from `private` for exactly this reuse) judges every
+/// candidate with the addon's own numbers, and the ladder is
+/// published through the same MatchResolution surface the
+/// player already observes, with the same progressive rule
+/// (quorum 3, soft 6 s, hard 15 s) and the same cache
+/// discipline (single-flight, adaptive TTL 60 s → 600 s,
+/// ~30 s negatives). The PlaylistStore resolve cache itself is
+/// keyed by M3U fixture identity, so the addon keeps its own
+/// cache here, keyed by addon meta id, with identical numbers.
+
+// MARK: - Model
+
+/// One addon meta as the BLV Anh tab presents it: a 24/7
+/// channel, a live event, or an upcoming event.
+struct NuvioItem: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case channel
+        case liveEvent
+        case upcomingEvent
+    }
+
+    /// The addon meta id ("nuvio_sport_…") — also the stream
+    /// lookup key and the resolve-cache key.
+    let id: String
+    /// The addon meta type ("tv" for everything in scope).
+    let type: String
+    let kind: Kind
+    /// The addon's raw name, emoji prefix and all.
+    let name: String
+    /// Poster/background art the addon provides (channel art
+    /// for networks, generated match art for events).
+    let poster: String
+    let team1Name: String?
+    let team1Logo: String?
+    let team2Name: String?
+    let team2Logo: String?
+    /// Kickoff parsed from the meta's `released` stamp
+    /// (events only; channels have none).
+    let kickoff: Date?
+    /// The "🏆 League:" line of the meta description, when it
+    /// carries one.
+    let league: String?
+    /// The meta's releaseInfo verbatim ("24/7", "LIVE", or a
+    /// kickoff clock text for upcoming entries).
+    let releaseInfo: String
+
+    /// The name with the addon's decoration removed: the
+    /// leading emoji/symbol run and a "LIVE:" prefix. The
+    /// addon's names are already clean titles underneath
+    /// ("📺 ABC", "🔴 LIVE: Egypt U17 vs Greece U17",
+    /// "⏱️ FK Austria Wien vs FC Bayern München").
+    var displayName: String {
+        var s = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = s.first, !first.isLetter && !first.isNumber {
+            s.removeFirst()
+        }
+        if s.lowercased().hasPrefix("live:") {
+            s = String(s.dropFirst("live:".count))
+                .trimmingCharacters(in: .whitespaces)
+        }
+        return s
+    }
+
+    /// "Team A vs Team B" sides when the meta carries teams
+    /// (event metas do; channel metas do not).
+    var teams: (String, String)? {
+        guard let team1Name, let team2Name else { return nil }
+        return (team1Name, team2Name)
+    }
+
+    var headline: String {
+        if let teams { return "\(teams.0) vs \(teams.1)" }
+        return displayName
+    }
+
+    /// A display-only Channel carrying this item's poster as
+    /// its logo, for the existing logo/crest views. Its URL is
+    /// a placeholder that is never played — playing goes
+    /// through NuvioStore.resolution(for:) — and its group is
+    /// the EN block's, so the English exclusion claims it
+    /// wherever it could surface.
+    var displayChannel: Channel {
+        Channel(title: name, logo: poster, group: LeagueClassifier.enGroupName,
+                url: "nuvio-meta://" + id, kickoff: kickoff, leagueRank: 9)
+    }
+}
+
+// MARK: - Addon client (wire shapes)
+
+/// The addon's JSON shapes, reduced to what the tab consumes.
+/// Non-isolated and value-typed throughout: decoding happens
+/// off the main actor, only models cross back.
+private enum NuvioWire {
+
+    struct Manifest: Decodable {
+        struct Catalog: Decodable {
+            let type: String
+            let id: String
+        }
+        let catalogs: [Catalog]
+    }
+
+    struct CatalogPage: Decodable {
+        let metas: [Meta]
+    }
+
+    struct Meta: Decodable {
+        struct Team: Decodable {
+            let name: String?
+            let logo: String?
+        }
+        let id: String
+        let type: String
+        let name: String
+        let poster: String?
+        let background: String?
+        let releaseInfo: String?
+        let released: String?
+        let description: String?
+        let team1: Team?
+        let team2: Team?
+    }
+
+    struct StreamPage: Decodable {
+        let streams: [AddonStream]
+    }
+
+    struct AddonStream: Decodable {
+        struct Hints: Decodable {
+            struct ProxyHeaders: Decodable {
+                let request: [String: String]?
+            }
+            let proxyHeaders: ProxyHeaders?
+        }
+        let name: String?
+        let title: String?
+        let url: String?
+        let behaviorHints: Hints?
+
+        /// One proxyHeaders.request value, looked up
+        /// case-insensitively (the addon is not consistent
+        /// about header casing across its scrapers).
+        func header(_ key: String) -> String {
+            guard let request = behaviorHints?.proxyHeaders?.request else { return "" }
+            for (k, v) in request where k.lowercased() == key.lowercased() {
+                return v
+            }
+            return ""
+        }
+    }
+}
+
+/// The HTTP half: manifest, catalogs (paged), streams.
+/// Stateless statics on an ephemeral session, mirroring
+/// StreamVerifier's session discipline.
+private enum NuvioClient {
+
+    static let base = URL(string: "https://nuviosports.xyz")!
+
+    /// The catalog allowlist, in tab order. The manifest
+    /// declares ~75 catalogs; the rest are replay shelves,
+    /// which the hunt scoped OUT of integration by design.
+    /// Live Now interleaves some 24/7 channel entries with
+    /// its events — the store splits them by releaseInfo.
+    static let catalogIDs = [
+        "nuvio_sports_live",
+        "nuvio_sports_upcoming",
+        "nuvio_sports_networks",
+    ]
+
+    /// Catalog page size the addon serves (verified live).
+    static let pageSize = 100
+    /// The paging bound: at most 4 pages (400 metas) per
+    /// catalog. Live Now and Networks both run past 1,200
+    /// metas; 400 leading entries per catalog is what a TV
+    /// tab can honestly present, and Upcoming (345 tonight)
+    /// exhausts inside the bound.
+    static let maxPages = 4
+
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 25
+        return URLSession(configuration: config)
+    }()
+
+    /// The allowlist intersected with what the manifest
+    /// actually declares (a renamed catalog drops out instead
+    /// of 404ing forever). A failed manifest fetch falls back
+    /// to the allowlist itself — the catalogs are the contract
+    /// the hunt verified, the manifest is the cross-check.
+    static func scopedCatalogIDs() async -> [String] {
+        guard let data = try? await fetch(Self.base.appendingPathComponent("manifest.json")),
+              let manifest = try? JSONDecoder().decode(NuvioWire.Manifest.self, from: data)
+        else { return catalogIDs }
+        let declared = Set(manifest.catalogs
+            .filter { $0.type == "tv" || $0.type == "events" }
+            .map(\.id))
+        let scoped = catalogIDs.filter { declared.contains($0) }
+        return scoped.isEmpty ? catalogIDs : scoped
+    }
+
+    /// One catalog, paged until a short page (exhausted) or
+    /// the page bound. A page that fails mid-catalog keeps
+    /// the pages already in hand — a partial catalog beats
+    /// none, and the store's last-good covers the rest.
+    static func fetchCatalog(id: String) async -> [NuvioWire.Meta] {
+        var out: [NuvioWire.Meta] = []
+        for page in 0..<maxPages {
+            // Built as strings, not appendingPathComponent: the
+            // paged shape carries a literal "skip=" component.
+            let url: URL
+            if page == 0 {
+                url = URL(string: "https://nuviosports.xyz/catalog/tv/\(id).json")!
+            } else {
+                url = URL(string: "https://nuviosports.xyz/catalog/tv/\(id)/skip=\(page * pageSize).json")!
+            }
+            guard let data = try? await fetch(url),
+                  let decoded = try? JSONDecoder().decode(NuvioWire.CatalogPage.self, from: data)
+            else { break }
+            out.append(contentsOf: decoded.metas)
+            if decoded.metas.count < pageSize { break }
+        }
+        return out
+    }
+
+    /// The stream list for one meta, unfiltered — the store
+    /// drops the url-less entries when it builds the ladder.
+    static func fetchStreams(type: String, id: String) async throws -> [NuvioWire.AddonStream] {
+        // Meta ids are addon-generated slugs; percent-encode
+        // defensively so an id can never break the path shape.
+        let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let url = URL(string: "https://nuviosports.xyz/stream/\(type)/\(safeID).json")!
+        let data = try await fetch(url)
+        return try JSONDecoder().decode(NuvioWire.StreamPage.self, from: data).streams
+    }
+
+    private static func fetch(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 25
+        request.setValue("Mozilla/5.0 (Linux; Android 14; TV)",
+                         forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+        guard status == 200 else { throw URLError(.badServerResponse) }
+        return data
+    }
+}
+
+// MARK: - Store
+
+/// The BLV Anh tab's addon content + playback resolution.
+/// A separate object from PlaylistStore by design: the
+/// fixture tabs read only the store, so addon content cannot
+/// leak into them; this object is read only by the EN tab.
+@MainActor
+final class NuvioStore: ObservableObject {
+
+    @Published private(set) var liveEvents: [NuvioItem] = []
+    @Published private(set) var upcomingEvents: [NuvioItem] = []
+    @Published private(set) var channels: [NuvioItem] = []
+    @Published private(set) var isLoading = false
+
+    private var lastFetch: Date?
+    private var loading = false
+
+    /// Last-good metas per catalog, kept at the META level:
+    /// the channel section is composed from TWO catalogs
+    /// (Networks canonical, Live Now's 24/7 strays after), so
+    /// a section-level keep-last-good is not enough — if
+    /// Networks fails while Live answers, composing from the
+    /// fresh lists alone would shrink the channel rail to
+    /// the strays. A catalog that answers empty or fails
+    /// contributes its last-good metas to the composition
+    /// instead, so its section can only be replaced by a
+    /// catalog that actually answered.
+    private var lastGoodLive: [NuvioWire.Meta] = []
+    private var lastGoodUpcoming: [NuvioWire.Meta] = []
+    private var lastGoodNetworks: [NuvioWire.Meta] = []
+
+    /// Catalog TTL: inside it, a tab open costs no fetch.
+    private static let catalogTTL: TimeInterval = 5 * 60
+
+    var hasContent: Bool {
+        !liveEvents.isEmpty || !upcomingEvents.isEmpty || !channels.isEmpty
+    }
+
+    var totalCount: Int {
+        liveEvents.count + upcomingEvents.count + channels.count
+    }
+
+    /// First open: fetch once. Later opens ride the TTL and
+    /// the scene-active hook (refreshIfStale), like the
+    /// playlist store's own discipline.
+    func load() async {
+        if lastFetch == nil { await refresh() }
+    }
+
+    func refreshIfStale() async {
+        guard let lastFetch else { await refresh(); return }
+        if Date().timeIntervalSince(lastFetch) > Self.catalogTTL {
+            await refresh()
+        }
+    }
+
+    /// Fetch the scoped catalogs in parallel and publish each
+    /// as it lands. Last-good rule, per catalog: a catalog
+    /// that answers empty or fails keeps its previously
+    /// published section — the addon flapping must never
+    /// blank a section it filled a minute ago, and with every
+    /// section empty the tab simply falls back to the old EN
+    /// block below.
+    func refresh() async {
+        if loading { return }
+        loading = true
+        isLoading = true
+        defer {
+            loading = false
+            isLoading = false
+        }
+        let ids = await NuvioClient.scopedCatalogIDs()
+        await withTaskGroup(of: (String, [NuvioWire.Meta]).self) { group in
+            for id in ids {
+                group.addTask { (id, await NuvioClient.fetchCatalog(id: id)) }
+            }
+            var liveMetas = lastGoodLive
+            var upcomingMetas = lastGoodUpcoming
+            var networkMetas = lastGoodNetworks
+            for await (id, metas) in group {
+                // An empty answer never replaces a catalog's
+                // last-good metas (see lastGoodLive above).
+                if !metas.isEmpty {
+                    switch id {
+                    case "nuvio_sports_live":
+                        liveMetas = metas
+                        lastGoodLive = metas
+                    case "nuvio_sports_upcoming":
+                        upcomingMetas = metas
+                        lastGoodUpcoming = metas
+                    case "nuvio_sports_networks":
+                        networkMetas = metas
+                        lastGoodNetworks = metas
+                    default: break
+                    }
+                }
+                // Publish progressively as catalogs land: the
+                // composition is a pure function of the three
+                // lists, so recomposing on each arrival is safe.
+                let composed = Self.compose(live: liveMetas,
+                                            upcoming: upcomingMetas,
+                                            networks: networkMetas)
+                if !composed.live.isEmpty { liveEvents = composed.live }
+                if !composed.upcoming.isEmpty { upcomingEvents = composed.upcoming }
+                if !composed.channels.isEmpty { channels = composed.channels }
+            }
+        }
+        if hasContent { lastFetch = Date() }
+    }
+
+    /// Split the three catalogs into the tab's three sections.
+    /// Live Now interleaves 24/7 channel entries (releaseInfo
+    /// "24/7") with its events: channels go to the channel
+    /// section, everything else is a live event. Upcoming
+    /// entries whose id is already live are dropped (live
+    /// wins). Channels dedupe by id, Networks first (it is
+    /// the canonical channel list), Live Now's strays after.
+    private static func compose(live: [NuvioWire.Meta],
+                                upcoming: [NuvioWire.Meta],
+                                networks: [NuvioWire.Meta])
+        -> (live: [NuvioItem], upcoming: [NuvioItem], channels: [NuvioItem]) {
+        var liveOut: [NuvioItem] = []
+        var channelOut: [NuvioItem] = []
+        var seenChannels = Set<String>()
+        for meta in networks {
+            let item = item(from: meta, kind: .channel)
+            if seenChannels.insert(item.id).inserted { channelOut.append(item) }
+        }
+        var liveIDs = Set<String>()
+        for meta in live {
+            if (meta.releaseInfo ?? "") == "24/7" {
+                let item = item(from: meta, kind: .channel)
+                if seenChannels.insert(item.id).inserted { channelOut.append(item) }
+            } else {
+                let item = item(from: meta, kind: .liveEvent)
+                if liveIDs.insert(item.id).inserted { liveOut.append(item) }
+            }
+        }
+        var upcomingOut: [NuvioItem] = []
+        var seenUpcoming = Set<String>()
+        for meta in upcoming where !liveIDs.contains(meta.id) {
+            let item = item(from: meta, kind: .upcomingEvent)
+            if seenUpcoming.insert(item.id).inserted { upcomingOut.append(item) }
+        }
+        return (liveOut, upcomingOut, channelOut)
+    }
+
+    private static func item(from meta: NuvioWire.Meta, kind: NuvioItem.Kind) -> NuvioItem {
+        NuvioItem(
+            id: meta.id,
+            type: meta.type,
+            kind: kind,
+            name: meta.name,
+            poster: meta.poster ?? meta.background ?? "",
+            team1Name: meta.team1?.name,
+            team1Logo: meta.team1?.logo,
+            team2Name: meta.team2?.name,
+            team2Logo: meta.team2?.logo,
+            kickoff: meta.released.flatMap(parseReleased),
+            league: leagueLine(from: meta.description),
+            releaseInfo: meta.releaseInfo ?? "")
+    }
+
+    /// The "🏆 League: X" line of the addon description.
+    private static func leagueLine(from description: String?) -> String? {
+        guard let description else { return nil }
+        for line in description.components(separatedBy: "\n") {
+            if let range = line.range(of: "League:") {
+                let value = line[range.upperBound...]
+                    .trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { return value }
+            }
+        }
+        return nil
+    }
+
+    private static let releasedFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let releasedFormatterPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private static func parseReleased(_ stamp: String) -> Date? {
+        releasedFormatter.date(from: stamp) ?? releasedFormatterPlain.date(from: stamp)
+    }
+
+    // MARK: - Playback resolution
+
+    /// The resolve numbers are the playlist store's own
+    /// (PlaylistStore.runResolve): quorum 3, soft deadline
+    /// 6 s, hard cap 15 s; cache TTL 60 s doubling to a
+    /// 600 s cap on healthy re-resolves, ~30 s negatives.
+    private static let resolveQuorum = 3
+    private static let resolveSoftDeadline: TimeInterval = 6
+    private static let resolveHardCap: TimeInterval = 15
+    private static let resolveBaseTTL: TimeInterval = 60
+    private static let resolveMaxTTL: TimeInterval = 600
+    private static let resolveNegativeTTL: TimeInterval = 30
+    private static let resolutionCacheCap = 100
+
+    private struct CachedLadder {
+        let sources: [ResolvedSource]
+        let expiresAt: Date
+    }
+
+    private var resolutionInFlight: [String: MatchResolution] = [:]
+    private var resolutionCache: [String: CachedLadder] = [:]
+    private var resolutionCacheOrder: [String] = []
+    private var resolutionTTLs: [String: TimeInterval] = [:]
+
+    /// The resolution a tap on an addon item plays from:
+    /// the addon's stream list for the meta, verified at
+    /// open through StreamVerifier and published
+    /// progressively — the same surface and rules as a
+    /// fixture open, keyed by meta id instead of fixture.
+    func resolution(for item: NuvioItem) -> MatchResolution {
+        if let entry = freshCacheEntry(forKey: item.id) {
+            return MatchResolution.completed(entry.sources)
+        }
+        if let flight = resolutionInFlight[item.id] {
+            return flight
+        }
+        let res = MatchResolution()
+        resolutionInFlight[item.id] = res
+        Task { await self.runResolve(item: item, into: res) }
+        return res
+    }
+
+    private func freshCacheEntry(forKey key: String) -> CachedLadder? {
+        guard let entry = resolutionCache[key] else { return nil }
+        if entry.expiresAt <= Date() {
+            resolutionCache.removeValue(forKey: key)
+            resolutionCacheOrder.removeAll { $0 == key }
+            return nil
+        }
+        resolutionCacheOrder.removeAll { $0 == key }
+        resolutionCacheOrder.append(key)
+        return entry
+    }
+
+    private func storeCacheEntry(key: String, sources: [ResolvedSource], ttl: TimeInterval) {
+        resolutionCache[key] = CachedLadder(
+            sources: sources, expiresAt: Date().addingTimeInterval(ttl))
+        resolutionCacheOrder.removeAll { $0 == key }
+        resolutionCacheOrder.append(key)
+        while resolutionCacheOrder.count > Self.resolutionCacheCap {
+            let victim = resolutionCacheOrder.removeFirst()
+            resolutionCache.removeValue(forKey: victim)
+        }
+    }
+
+    /// Resolve one addon meta: fetch its streams, build the
+    /// ladder (url-carrying entries only — the addon's
+    /// donation row and any other externalUrl-only entry can
+    /// never play in-app), verify progressively, publish.
+    /// A meta with no playable streams, or a stream fetch
+    /// that fails outright, finishes EMPTY: the player shows
+    /// its no-signal slate — the designed fail-soft, never a
+    /// hung screen.
+    private func runResolve(item: NuvioItem, into res: MatchResolution) async {
+        defer {
+            if resolutionInFlight[item.id] === res {
+                resolutionInFlight.removeValue(forKey: item.id)
+            }
+        }
+        let streams: [NuvioWire.AddonStream]
+        do {
+            streams = try await NuvioClient.fetchStreams(type: item.type, id: item.id)
+        } catch {
+            res.publish([])
+            res.finish()
+            storeCacheEntry(key: item.id, sources: [], ttl: Self.resolveNegativeTTL)
+            return
+        }
+        // The ladder follows the playlist store's own rule
+        // (sources(for:)): deduplicated by URL — the player
+        // tracks rungs by URL, so a second row for the same
+        // URL under different headers could never be tried
+        // as its own rung — and capped at 8 candidates.
+        var seenURLs = Set<String>()
+        let ladder: [Channel] = Array(streams.compactMap { stream in
+            guard let url = stream.url, !url.isEmpty,
+                  seenURLs.insert(url).inserted else { return nil }
+            return Channel(
+                title: item.displayName,
+                logo: item.poster,
+                group: LeagueClassifier.enGroupName,
+                url: url,
+                kickoff: item.kickoff,
+                leagueRank: 9,
+                referrer: stream.header("Referer"),
+                userAgent: stream.header("User-Agent"),
+                origin: stream.header("Origin"))
+        }.prefix(8))
+        if ladder.isEmpty {
+            res.publish([])
+            res.finish()
+            storeCacheEntry(key: item.id, sources: [], ttl: Self.resolveNegativeTTL)
+            return
+        }
+        let started = Date()
+        var verdicts: [Int: MatchVerdict] = [:]
+        let softDeadline = Self.resolveSoftDeadline
+        let hardCap = Self.resolveHardCap
+        await withTaskGroup(of: (Int, MatchVerdict?).self) { group in
+            for (i, ch) in ladder.enumerated() {
+                group.addTask { (i, await StreamVerifier.verify(ch)) }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(softDeadline))
+                return (-2, nil)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(hardCap))
+                return (-1, nil)
+            }
+            var presented = false
+            for await (i, verdict) in group {
+                if i == -1 { break } // hard cap: stop collecting
+                if i >= 0, let verdict { verdicts[i] = verdict }
+                if !presented {
+                    let verified = Self.verifiedSources(ladder: ladder, verdicts: verdicts)
+                    let settled = verdicts.count == ladder.count
+                    let quorum = verified.count >= Self.resolveQuorum
+                    let softPassed = Date().timeIntervalSince(started) >= Self.resolveSoftDeadline
+                    if !verified.isEmpty && (quorum || softPassed || settled) {
+                        res.publish(verified)
+                        presented = true
+                    }
+                }
+                if verdicts.count == ladder.count { break }
+            }
+            group.cancelAll()
+        }
+        // The finished ladder mirrors PlaylistStore's: verified
+        // rungs in candidate order, then the blind tier;
+        // definitively dead rungs never appear.
+        var final: [ResolvedSource] = Self.verifiedSources(ladder: ladder, verdicts: verdicts)
+        for (i, ch) in ladder.enumerated() {
+            switch verdicts[i] {
+            case .verified, .dead:
+                break
+            case .keptBlind, .failedTransient, nil:
+                final.append(ResolvedSource(channel: ch, quality: nil, verified: false))
+            }
+        }
+        let verifiedCount = verdicts.values.filter {
+            if case .verified = $0 { return true }
+            return false
+        }.count
+        if !Task.isCancelled {
+            res.publish(final)
+            res.finish()
+            if verifiedCount > 0 {
+                let ttl = resolutionTTLs[item.id] ?? Self.resolveBaseTTL
+                storeCacheEntry(key: item.id, sources: final, ttl: ttl)
+                resolutionTTLs[item.id] = min(ttl * 2, Self.resolveMaxTTL)
+            } else {
+                storeCacheEntry(key: item.id, sources: final, ttl: Self.resolveNegativeTTL)
+                if let ttl = resolutionTTLs[item.id] {
+                    resolutionTTLs[item.id] = max(ttl / 2, Self.resolveBaseTTL)
+                }
+            }
+        } else {
+            res.finish()
+        }
+    }
+
+    private static func verifiedSources(ladder: [Channel],
+                                        verdicts: [Int: MatchVerdict]) -> [ResolvedSource] {
+        ladder.enumerated().compactMap { i, _ in
+            guard case .verified(let ch, let quality)? = verdicts[i] else { return nil }
+            return ResolvedSource(channel: ch, quality: quality, verified: true)
+        }
+    }
+}
+
+// MARK: - Cards (the EN section's existing idiom)
+
+/// One addon 24/7 channel in the BLV Anh tab: the same
+/// 470×252 card as TVENChannelCard — logo, name, a chip, a
+/// play line — with the chip naming the source so the owner
+/// can tell addon channels from the old block at a glance.
+struct NuvioChannelCard: View {
+    let item: NuvioItem
+    let focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                if !item.poster.isEmpty {
+                    TVChannelLogo(channel: item.displayChannel, height: 58)
+                } else {
+                    Image(systemName: "tv")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                Spacer()
+                Text("NUVIO · 24/7")
+                    .font(.system(size: 19, weight: .heavy))
+                    .foregroundStyle(TVPalette.cyan)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(TVPalette.tealFill))
+            }
+            Text(item.displayName)
+                .font(.system(size: 31, weight: .bold))
+                .foregroundStyle(focused ? TVPalette.cyan : .white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
+            HStack(spacing: 10) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(TVPalette.cyan)
+                Text(item.league.map { "Kênh tiếng Anh · \($0)" } ?? "Kênh tiếng Anh · phát liên tục")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+            }
+        }
+        .padding(22)
+        .frame(width: 470, height: 252, alignment: .topLeading)
+        .background(tvCardBackground(focused: focused))
+    }
+}
+
+/// One addon event (live or upcoming) in the BLV Anh tab:
+/// the match-tile idiom — crest-vs-crest when the meta
+/// carries teams (the addon ships TheSportsDB badges for
+/// both sides), the headline, and a status chip in the
+/// section's language: red LIVE for a match on air, amber
+/// device-local kickoff for one to come.
+struct NuvioEventCard: View {
+    let item: NuvioItem
+    let focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                crestRow
+                Spacer()
+                statusChip
+            }
+            Text(item.headline)
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(focused ? TVPalette.cyan : .white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
+            Text(meta)
+                .font(.system(size: 20))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+        }
+        .padding(22)
+        .frame(width: 470, height: 252, alignment: .topLeading)
+        .background(tvCardBackground(focused: focused))
+    }
+
+    @ViewBuilder
+    private var crestRow: some View {
+        if item.teams != nil {
+            HStack(spacing: 10) {
+                TVCrestImage(url: item.team1Logo.flatMap(URL.init(string:)), size: 62)
+                Text("vs")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                TVCrestImage(url: item.team2Logo.flatMap(URL.init(string:)), size: 62)
+            }
+        } else {
+            TVChannelLogo(channel: item.displayChannel, height: 54)
+        }
+    }
+
+    @ViewBuilder
+    private var statusChip: some View {
+        if item.kind == .liveEvent {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(TVPalette.liveRed)
+                    .frame(width: 13, height: 13)
+                Text("LIVE")
+                    .font(.system(size: 19, weight: .heavy))
+                    .foregroundStyle(TVPalette.liveRed)
+            }
+        } else if let kickoff = item.kickoff {
+            Text("⏰ " + TVKickoffFormat.time.string(from: kickoff))
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(TVPalette.amber)
+        } else if !item.releaseInfo.isEmpty {
+            Text("⏰ " + item.releaseInfo)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(TVPalette.amber)
+        }
+    }
+
+    private var meta: String {
+        var parts: [String] = []
+        if let kickoff = item.kickoff {
+            parts.append(TVKickoffFormat.timeDay.string(from: kickoff))
+        }
+        if let league = item.league { parts.append(league) }
+        parts.append("Nuvio")
+        return parts.joined(separator: "  ·  ")
+    }
+}
