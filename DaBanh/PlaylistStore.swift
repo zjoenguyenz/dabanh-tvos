@@ -72,6 +72,13 @@ final class PlaylistStore: ObservableObject {
     /// Bumped when the crest map is swapped for a fresher remote copy,
     /// so crest-reading views re-render with the new badges.
     @Published private(set) var crestsRevision = 0
+    /// Live match states (1.4.1, plan §1): ESPN > FotMob >
+    /// LiveScore > computed clock. Owned here; views read states
+    /// through matchState(for:) / competition(for:), never the
+    /// store directly. liveRevision bumps when states land so
+    /// state-reading views re-render on the 60 s poll.
+    let liveStore = MatchStateStore()
+    @Published private(set) var liveRevision = 0
     @Published private(set) var isLoading = false
     /// True while a link-validation pass runs (automatic or manual);
     /// the "Kiểm tra link" button spins on it.
@@ -130,7 +137,7 @@ final class PlaylistStore: ObservableObject {
         var seen = Set<String>()
         var live: [Channel] = []
         for channel in channels + hotChannels {
-            guard LeagueClassifier.bucket(of: channel, now: now) == 0 else { continue }
+            guard effectiveBucket(of: channel, now: now) == 0 else { continue }
             if seen.insert(channel.url).inserted {
                 live.append(channel)
             }
@@ -145,6 +152,13 @@ final class PlaylistStore: ObservableObject {
     func start() async {
         loadCache()
         scheduleValidation()
+        // Live-state polling rides its own cadence (60 s live /
+        // 5 min idle, plan §1.7) beside the 15-min playlist loop.
+        liveStore.onChange = { [weak self] in self?.liveRevision += 1 }
+        liveStore.start(fixturesProvider: { [weak self] in
+            guard let self else { return [] }
+            return self.channels + self.hotChannels
+        })
         await refresh()
         // Crest coverage updates ride the same GitHub mirror as the
         // playlist: fetch once per launch, swap in if fresher.
@@ -242,6 +256,8 @@ final class PlaylistStore: ObservableObject {
                 }
             }
         }
+        // A playlist refresh also triggers a state fetch (§1.7).
+        liveStore.requestFetch()
         pickInitialTabIfNeeded()
         scheduleValidation()
     }
@@ -348,6 +364,46 @@ final class PlaylistStore: ObservableObject {
             }
         }
         return out.isEmpty ? [ch] : out
+    }
+
+    // MARK: - Live state (1.4.1, plan §1/§2.2/§3)
+
+    /// The matched live state for a fixture, if any source bound
+    /// one (pair-key + date agreement, fail closed — see
+    /// MatchStateStore.state(for:)).
+    func matchState(for ch: Channel) -> MatchState? {
+        liveStore.state(for: ch)
+    }
+
+    /// The fixture's competition identity (plan §3.5): rule 1, a
+    /// matched state's competition, wins; rule 2, the both-clubs
+    /// lower-division test, files unmatched fixtures; otherwise
+    /// nil (unknown → top section of its country tab, as today).
+    func competition(for ch: Channel) -> CompetitionID? {
+        if let competition = liveStore.state(for: ch)?.competition {
+            return competition
+        }
+        return DivisionClassifier.lowerCompetition(for: ch)
+    }
+
+    /// Bucket with the matched state consulted first (plan §2.2):
+    /// FT / postponed / cancelled leave bucket 0 at the poll that
+    /// reports them; a not-started state suppresses bucket 0 even
+    /// inside the −10 min window; a matched-live state stays in
+    /// bucket 0 past +125 min while the source says live (extra
+    /// time / penalties are real). Unmatched fixtures keep the
+    /// classifier's bucket exactly.
+    func effectiveBucket(of ch: Channel, now: Date = Date()) -> Int {
+        let base = LeagueClassifier.bucket(of: ch, now: now)
+        guard let state = liveStore.state(for: ch, now: now) else { return base }
+        switch state.status {
+        case .ft, .postponed, .cancelled:
+            return base == 0 ? 3 : base
+        case .pre:
+            return base == 0 ? 1 : base
+        case .live, .ht:
+            return 0
+        }
     }
 
     // MARK: - Match resolution (at-open verification, v1.3.7)

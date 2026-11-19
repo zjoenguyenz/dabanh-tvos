@@ -4,8 +4,10 @@ import SwiftUI
 /// the phone. The composition is the TV app's own, built and tuned
 /// on the owner's TV since v1.2: a fixed cinematic hero whose
 /// content follows the focused card, pill tabs, and horizontal
-/// rails you drive with the remote from the sofa — 60pt overscan
-/// margins, nothing important under 20pt, and a cyan focus ring
+/// rails you drive with the remote from the sofa — 32pt screen
+/// margins (60pt before the 2026-11-19 fit fix, which moved the
+/// content to the edges so a 3-board row fits whole), nothing
+/// important under 20pt, and a cyan focus ring
 /// thick enough to read across the room. Football identity only —
 /// deep-teal palette and crest-first cards, deliberately unlike
 /// the general TV app so the two are never confused.
@@ -37,6 +39,9 @@ struct TVContentView: View {
     @StateObject private var nuvio = NuvioStore()
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
+    /// The open fixture's link board (1.4.1, spec §2): a fixture
+    /// tap opens its board first; a board row tap plays.
+    @State private var boardRequest: BoardRequest?
     @State private var heroItem: HeroItem?
     @FocusState private var focusedKey: String?
 
@@ -49,6 +54,13 @@ struct TVContentView: View {
     private struct PlayRequest: Identifiable {
         let id = UUID()
         let resolution: MatchResolution
+    }
+
+    private struct BoardRequest: Identifiable {
+        let id = UUID()
+        let entry: TVFixtureEntry
+        let vnSources: [Channel]
+        let enItems: [NuvioItem]
     }
 
     private enum HeroItem {
@@ -82,45 +94,133 @@ struct TVContentView: View {
     /// rail — while every other entry keeps the store's order
     /// exactly. See TVFixtureEntry.pinnedFirst.
     private var entries: [TVFixtureEntry] {
-        TVFixtureEntry.pinnedFirst(TVFixtureEntry.group(tabChannels))
+        if isCupTab { return cupEntries }
+        return TVFixtureEntry.pinnedFirst(enriched(TVFixtureEntry.group(tabChannels)))
     }
 
-    /// Featured rail entries: the first live fixtures on the
-    /// Trực tiếp tab (which the store fills with live matches only,
-    /// and opens on whenever anything is live) — with one addition
-    /// for the pin: when MU is only UPCOMING, this tab's own list
-    /// (live matches only) does not carry the fixture at all, so
-    /// the pinned MU entry is prepended from the wider loaded
-    /// data and the hero + featured rail still lead with it, as
-    /// the owner's "MU sắp đá hoặc đang đá thì luôn nằm đầu tiên"
-    /// requires. The live fixture displaced from the rail's tenth
-    /// slot is not lost: the ĐANG ĐÁ rail below excludes only
-    /// featured ids, so it reappears there.
-    private var featuredEntries: [TVFixtureEntry] {
-        guard store.selectedLeague == PlaylistStore.liveTabValue else { return [] }
-        if entries.contains(where: { $0.isManchesterUnited }) {
-            return Array(entries.prefix(10))
+    /// Attach each fixture's matched live state + competition
+    /// identity (spec §1/§3): the store is the only reader of the
+    /// state store; entries carry the result to the views.
+    private func enriched(_ list: [TVFixtureEntry]) -> [TVFixtureEntry] {
+        let _ = store.liveRevision
+        return list.map { entry in
+            var e = entry
+            e.state = store.matchState(for: entry.channel)
+            e.competition = store.competition(for: entry.channel)
+            return e
         }
-        if let pin = muPinEntry {
-            return Array(([pin] + entries).prefix(10))
-        }
-        return Array(entries.prefix(10))
     }
 
-    /// The best Manchester United fixture in everything the store
-    /// has loaded — live first, then nearest kickoff — or nil
-    /// when MU has no live or upcoming match in the data. Built
-    /// from the lists already in memory (the same channels +
-    /// hotChannels merge PlaylistStore.liveChannels uses, EN
-    /// block excluded, deduplicated by URL): the pin never costs
-    /// an extra fetch.
-    private var muPinEntry: TVFixtureEntry? {
+    private var isCupTab: Bool { store.selectedLeague == LeagueClassifier.cupTabValue }
+
+    /// Every fixture in the loaded data (both published lists,
+    /// EN block excluded, URL-deduped) — the pool the cups tab
+    /// and the Nuvio attach read from.
+    private var allEntries: [TVFixtureEntry] {
         var seen = Set<String>()
         var pool: [Channel] = []
         for ch in store.channels + store.hotChannels where !TVEnglish.isEnglish(ch) {
             if seen.insert(ch.url).inserted { pool.append(ch) }
         }
-        return TVFixtureEntry.manchesterUnitedPin(in: TVFixtureEntry.group(pool))
+        return enriched(TVFixtureEntry.group(pool))
+    }
+
+    /// The cups tab's fixtures: positively identified cup
+    /// fixtures only (spec §4.2 S1 — a matched state's cup slug;
+    /// club pools are NEVER a classifier, §4.2 S3/R4). Dual
+    /// presence (spec §4.1): they also remain in their country
+    /// tabs — this list is an additional home, not a move.
+    private var cupEntries: [TVFixtureEntry] {
+        allEntries.filter { $0.isCupFixture }
+    }
+
+    /// Nuvio cup events for the cups tab (spec §4.2 S2): addon
+    /// event metas whose competition string EXACTLY names a cup.
+    private var nuvioCupEvents: [NuvioItem] {
+        (nuvio.liveEvents + nuvio.upcomingEvents).filter {
+            DivisionClassifier.competition(forNuvioLeagueLine: $0.league)?.isCup == true
+        }
+    }
+
+    // MARK: - Nuvio attach (spec §2.5 + owner refinement 13:53 CST)
+
+    /// The Nuvio English events that belong to THIS fixture —
+    /// per-match merge only, fail closed. Belonging is the same
+    /// matching as the livescore layer (Addendum 2 matcher):
+    /// canonical pair-key equal AND the meta's kickoff naming the
+    /// same ICT calendar date as the fixture's stamp AND the
+    /// instants within 3 h AND the event matching no OTHER
+    /// fixture under the same rule (an ambiguous event folds
+    /// nowhere). Channels (24/7) are never events and never
+    /// attach. An event that attaches nowhere stays in the BLV
+    /// Anh tab exactly as today — the tab is never emptied.
+    private func attachedNuvioEvents(for entry: TVFixtureEntry) -> [NuvioItem] {
+        guard let teams = entry.teams, let kickoff = entry.channel.kickoff,
+              let pair = MatchPairKey.key(home: teams.0, away: teams.1) else { return [] }
+        let dateKey = FixtureGrouping.stampDateKey(of: kickoff)
+        // Candidate fixture cards for this pair + ICT date,
+        // including the tapped entry itself (its tab's grouping
+        // can split clusters differently from the pool's).
+        var byID: [String: TVFixtureEntry] = [:]
+        for e in allEntries + [entry] { byID[e.id] = e }
+        let candidates = byID.values.filter { e in
+            guard let t = e.teams, let k = e.channel.kickoff,
+                  MatchPairKey.key(home: t.0, away: t.1) == pair else { return false }
+            return FixtureGrouping.stampDateKey(of: k) == dateKey
+        }
+        // Clusters: candidates whose kickoffs chain within
+        // 45 min are ONE match whose listings were spelling-split
+        // (A2.1) — an event attaches to every card of its cluster.
+        let sorted = candidates.sorted {
+            ($0.channel.kickoff ?? .distantPast) < ($1.channel.kickoff ?? .distantPast)
+        }
+        var clusters: [[TVFixtureEntry]] = []
+        for e in sorted {
+            let k = e.channel.kickoff ?? .distantPast
+            if let last = clusters.last,
+               let latest = last.map({ $0.channel.kickoff ?? .distantPast }).max(),
+               k.timeIntervalSince(latest) <= 45 * 60 {
+                clusters[clusters.count - 1].append(e)
+            } else {
+                clusters.append([e])
+            }
+        }
+        guard let entryCluster = clusters.first(where: { c in c.contains { $0.id == entry.id } }),
+              let clusterKickoff = entryCluster.map({ $0.channel.kickoff ?? .distantFuture }).min()
+        else { return [] }
+        let fixtureMarked = isWomenMarked(teams.0) || isWomenMarked(teams.1)
+        return (nuvio.liveEvents + nuvio.upcomingEvents).filter { item in
+            guard let t = item.teams, let ek = item.kickoff,
+                  MatchPairKey.key(home: t.0, away: t.1) == pair,
+                  FixtureGrouping.stampDateKey(of: ek) == dateKey,
+                  abs(ek.timeIntervalSince(clusterKickoff)) <= 3 * 3600 else { return false }
+            // Clusters > 45 min apart are two real matches: the
+            // event folds only if exactly one cluster is inside
+            // the 3 h instant guard — and it must be this one.
+            let inGuard = clusters.filter { c in
+                guard let ck = c.map({ $0.channel.kickoff ?? .distantFuture }).min()
+                else { return false }
+                return abs(ek.timeIntervalSince(ck)) <= 3 * 3600
+            }
+            guard inGuard.count == 1,
+                  inGuard.first?.contains(where: { $0.id == entry.id }) == true
+            else { return false }
+            // Marker asymmetry (A2.1): an unmarked event folds
+            // into a women-marked fixture (or the reverse) only
+            // when it is the UNIQUE candidate for pair + date.
+            let eventMarked = isWomenMarked(t.0) || isWomenMarked(t.1)
+            if eventMarked != fixtureMarked && clusters.count != 1 { return false }
+            return true
+        }
+    }
+
+    /// A team name carries the women's marker when a marker token
+    /// (Addendum 2's set) appears in its normalised form. Used
+    /// ONLY for the belonging asymmetry guard — classification
+    /// sees markers through its own rule (spec §3.2 S3).
+    private func isWomenMarked(_ name: String) -> Bool {
+        let markers: Set<String> = ["women", "w", "nu", "feminin", "femmes", "femenino", "femenina"]
+        return Crests.norm(name).split(separator: " ").contains { markers.contains(String($0)) }
     }
 
     // MARK: - League tab addon content (owner, 2026-11-19 12:58 CST)
@@ -135,7 +235,7 @@ struct TVContentView: View {
         guard let league = League(rawValue: store.selectedLeague) else { return nil }
         switch league {
         case .spain, .italy, .france, .germany: return league
-        case .england, .other: return nil
+        case .england, .other, .cups: return nil
         }
     }
 
@@ -205,7 +305,7 @@ struct TVContentView: View {
                     "Kênh Bundesliga từ addon Nuvio — phát liên tục.",
                     "Kênh giải Đức",
                     "Kênh giải Đức · phát liên tục")
-        case .england, .other:
+        case .england, .other, .cups:
             return ("📺  NUVIO · KÊNH 24/7",
                     "Kênh từ addon Nuvio — phát liên tục.",
                     "Kênh Nuvio",
@@ -237,7 +337,11 @@ struct TVContentView: View {
                 }
                 scrollBody
             }
-            .padding(.horizontal, 60)
+            // Fit fix (2026-11-19, with Sony 2.20): side padding
+            // 60 -> 32pt so a rail row of three live boards fits
+            // entirely on the 1920pt screen — see TVLiveBoardView's
+            // width note in TVMatchViews.swift.
+            .padding(.horizontal, 32)
             .padding(.top, 40)
             .padding(.bottom, 28)
         }
@@ -267,6 +371,12 @@ struct TVContentView: View {
         }
         .fullScreenCover(item: $playRequest) { request in
             TVPlayerView(resolution: request.resolution)
+        }
+        .fullScreenCover(item: $boardRequest) { request in
+            TVMatchBoardView(entry: request.entry,
+                             vnSources: request.vnSources,
+                             enItems: request.enItems,
+                             nuvio: nuvio)
         }
         .onChange(of: focusedKey) { _, key in
             guard let key else { return }
@@ -349,22 +459,33 @@ struct TVContentView: View {
             .ignoresSafeArea()
     }
 
+    /// Compact header (1.4.1, spec §0/§5.2-6): ONE row — small
+    /// logo left; clock + dabanh.tv right, at the prototype's
+    /// mini sizes. The Làm mới / Kiểm tra link mini-buttons keep
+    /// their pill-row place directly beneath (their focus-travel
+    /// position is load-bearing since v1.2.7 — see tabBar); the
+    /// old 56-pt two-line brand block is gone.
     private var header: some View {
-        HStack(alignment: .top, spacing: 24) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("TRỰC TIẾP BÓNG ĐÁ")
-                    .font(.system(size: 23, weight: .semibold))
-                    .tracking(6)
-                    .foregroundStyle(Color(red: 0.45, green: 0.90, blue: 0.83))
-                Text("Đá Banh TV")
-                    .font(.system(size: 56, weight: .bold))
+        HStack(alignment: .center, spacing: 18) {
+            Text("⚽")
+                .font(.system(size: 30))
+            HStack(spacing: 8) {
+                Text("ĐÁ BANH")
+                    .font(.system(size: 30, weight: .bold))
                     .foregroundStyle(.white)
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(TVPalette.cyan)
-                    .frame(width: 120, height: 6)
+                Text("TV")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(TVPalette.boardSky)
             }
             Spacer()
+            Text(TVKickoffFormat.time.string(from: Date()))
+                .font(.system(size: 20))
+                .foregroundStyle(Color(red: 0.388, green: 0.463, blue: 0.604))
+            Text("dabanh.tv")
+                .font(.system(size: 20))
+                .foregroundStyle(TVPalette.leagueTx)
         }
+        .padding(.bottom, 4)
     }
 
     private var countText: String {
@@ -376,6 +497,9 @@ struct TVContentView: View {
         }
         if store.selectedLeague == PlaylistStore.hotTabValue {
             return "\(entries.count) trận hot"
+        }
+        if isCupTab {
+            return "\(entries.count) trận cúp châu Âu"
         }
         if foldLeague != nil && hasLeagueAddon {
             let matches = entries.count + leagueLiveEvents.count + leagueUpcomingEvents.count
@@ -391,24 +515,34 @@ struct TVContentView: View {
         // the action buttons get a row of their own — cramming both
         // into one HStack (~2,290pt) exceeded the 1,800pt available
         // and crushed the buttons until focus could not land on them.
-        // The EN pill joins row two for the same reason: row one is
-        // already full, and row two sits directly under the pills,
-        // one remote-press away.
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 16) {
+        // That two-row structure is load-bearing for focus travel
+        // and is KEPT. Owner final form (2026-11-19 14:38 CST):
+        // the ENG pill LEADS the bar — it is the first pill of
+        // row one, ahead of Trực tiếp / Hot and the league pills
+        // in League.tabOrder (NHA · TBN · Ý · Đức · Pháp ·
+        // Khác · Cúp EU, cups last) — so the ENG + league
+        // sequence renders ENG first and Cúp EU last. ENG fits
+        // row one because every pill in the bar now shares the
+        // same SMALL uniform metrics (see tabPill): the bar is
+        // compact and does not grow — it shrinks.
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                if !enChannels.isEmpty || nuvio.hasContent {
+                    tabPill(title: "ENG", value: Self.enTabValue)
+                }
                 tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
                 tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
-                ForEach(League.allCases) { league in
-                    tabPill(title: league.name, value: league.rawValue)
+                ForEach(League.tabOrder) { league in
+                    tabPill(title: league.tabTitle, value: league.rawValue)
                 }
                 Spacer()
                 Text(countText)
-                    .font(.system(size: 24))
+                    .font(.system(size: 20))
                     .foregroundStyle(.white.opacity(0.75))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 // The action buttons stay near the pills on purpose: as
                 // a lone button in the header row above, tvOS spatial
                 // focus could not reach it from the pills (owner, v1.1).
@@ -424,9 +558,9 @@ struct TVContentView: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .font(.system(size: 24, weight: .medium))
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 12)
+                    .font(.system(size: 20, weight: .medium))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:refresh",
                                            selected: false))
                 }
@@ -445,33 +579,45 @@ struct TVContentView: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .font(.system(size: 24, weight: .medium))
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 12)
+                    .font(.system(size: 20, weight: .medium))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:check",
                                            selected: false))
                 }
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:check")
                 .disabled(store.isLoading || store.isValidating)
-                if !enChannels.isEmpty || nuvio.hasContent {
-                    tabPill(title: "🌍 EN · BLV Anh", value: Self.enTabValue)
-                }
             }
         }
     }
 
+    /// ONE pill construction for every tab in the bar (owner
+    /// final form, 2026-11-19 14:38 CST): SMALL and UNIFORM —
+    /// every tab pill, ENG included, is built here with the
+    /// identical metrics: font size 20, weight .medium (the
+    /// selected state no longer switches to .bold, which made
+    /// the selected pill wider than its neighbours; selection
+    /// is shown by the TVPillFace fill alone), horizontal
+    /// padding 20, vertical padding 10. Width still follows
+    /// each label's text (a fixed width would clip "Trực
+    /// tiếp" or strand "Ý"); height, padding and text size —
+    /// the pill metrics — are identical for every tab, and no
+    /// focus geometry is hand-drawn here: the focus treatment
+    /// stays the app's existing TVPillFace / OS path, shared
+    /// by all pills alike. The two action buttons in the bar
+    /// use these same font/padding metrics.
     private func tabPill(title: String, value: Int) -> some View {
         let selected = store.selectedLeague == value
         return Button {
             store.selectedLeague = value
         } label: {
             Text(title)
-                .font(.system(size: 26, weight: selected ? .bold : .medium))
+                .font(.system(size: 20, weight: .medium))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 30)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
                 .background(TVPillFace(focused: focusedKey == "pill:\(value)",
                                        selected: selected))
                 .foregroundStyle(.white)
@@ -487,6 +633,9 @@ struct TVContentView: View {
         if store.selectedLeague == PlaylistStore.hotTabValue {
             return "Chưa có trận hot nào. Trang nguồn gắn cờ hot cho trận nào thì trận đó hiện ở đây."
         }
+        if isCupTab {
+            return "Chưa có trận cúp châu Âu nào được xác định. Các trận cúp hiện ở đây khi nguồn trực tiếp (ESPN/FotMob) xác nhận đúng giải — không đoán từ tên câu lạc bộ."
+        }
         return "Chưa có trận nào trong mục này."
     }
 
@@ -497,7 +646,8 @@ struct TVContentView: View {
         if isENTab {
             enBody
         } else if entries.isEmpty && featuredEntries.isEmpty
-                    && !hasLeagueAddon {
+                    && !hasLeagueAddon
+                    && !(isCupTab && !nuvioCupEvents.isEmpty) {
             Spacer()
             if store.isLoading || (foldLeague != nil && nuvio.isLoading) {
                 ProgressView("Đang tải danh sách…")
@@ -510,17 +660,46 @@ struct TVContentView: View {
                     .foregroundStyle(.white.opacity(0.7))
             }
             Spacer()
+        } else if isCupTab {
+            cupBody
         } else {
             let now = Date()
             let featuredIDs = Set(featuredEntries.map(\.id))
-            let live = entries.filter {
-                LeagueClassifier.bucket(of: $0.channel, now: now) == 0 && !featuredIDs.contains($0.id)
+            // Division partition (spec §3.1): inside a country
+            // tab the top block leads with the existing rail
+            // order; positively-identified division-2 fixtures
+            // form their own block below with a smaller header.
+            // Unknown fixtures stay in the top block — the split
+            // never removes a fixture from any global list.
+            let isCountryTab = League(rawValue: store.selectedLeague).map {
+                $0 != .other && $0 != .cups
+            } ?? false
+            let topEntries = isCountryTab ? entries.filter { !$0.isLowerDivision } : entries
+            let lowerEntries = isCountryTab ? entries.filter { $0.isLowerDivision } : []
+            let onLiveTab = store.selectedLeague == PlaylistStore.liveTabValue
+            let live = topEntries.filter {
+                store.effectiveBucket(of: $0.channel, now: now) == 0 && !featuredIDs.contains($0.id)
+                    && !(onLiveTab && $0.isCupFixture)
             }
-            let upcoming = entries.filter {
-                let b = LeagueClassifier.bucket(of: $0.channel, now: now)
+            let cupLive = onLiveTab ? topEntries.filter {
+                store.effectiveBucket(of: $0.channel, now: now) == 0 && $0.isCupFixture
+                    && !featuredIDs.contains($0.id)
+            } : []
+            let upcoming = topEntries.filter {
+                let b = store.effectiveBucket(of: $0.channel, now: now)
                 return b == 1 || b == 2
             }
-            let rest = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 3 }
+            let rest = topEntries.filter { store.effectiveBucket(of: $0.channel, now: now) == 3 }
+            let lowerLive = lowerEntries.filter {
+                store.effectiveBucket(of: $0.channel, now: now) == 0
+            }
+            let lowerUpcoming = lowerEntries.filter {
+                let b = store.effectiveBucket(of: $0.channel, now: now)
+                return b == 1 || b == 2
+            }
+            let lowerRest = lowerEntries.filter {
+                store.effectiveBucket(of: $0.channel, now: now) == 3
+            }
             // Hero stays FIXED above the rails (owner ruling 2026-11-13):
             // inside the ScrollView it got half-clipped whenever focus
             // dived down into the rails.
@@ -534,6 +713,9 @@ struct TVContentView: View {
                         if !live.isEmpty {
                             railSection("🔴  ĐANG ĐÁ", live)
                         }
+                        if !cupLive.isEmpty {
+                            railSection("🏆  CÚP CHÂU ÂU · ĐANG ĐÁ", cupLive)
+                        }
                         if !leagueLiveEvents.isEmpty {
                             nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", leagueLiveEvents)
                         }
@@ -545,6 +727,11 @@ struct TVContentView: View {
                         }
                         if !rest.isEmpty {
                             railSection("📺  KHÁC", rest)
+                        }
+                        if !lowerEntries.isEmpty, let league = League(rawValue: store.selectedLeague),
+                           let lower = CompetitionID.lower(forCountryRank: league.rawValue) {
+                            lowerDivisionSection(lower, live: lowerLive,
+                                                 upcoming: lowerUpcoming, rest: lowerRest)
                         }
                         if let league = foldLeague, !leagueAddonChannels.isEmpty {
                             leagueChannelRail(leagueAddonChannels, league: league)
@@ -558,10 +745,104 @@ struct TVContentView: View {
         }
     }
 
+    /// The division-2 block of a country tab (spec §3.1): a
+    /// SMALLER sub-header (rail title −4 pt) and its own
+    /// live → upcoming → rest order, tiles at the standard size.
+    /// Rendered only when the block holds at least one fixture —
+    /// an empty division shows no header at all.
+    private func lowerDivisionSection(_ competition: CompetitionID,
+                                      live: [TVFixtureEntry],
+                                      upcoming: [TVFixtureEntry],
+                                      rest: [TVFixtureEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 30) {
+            Text(competition.label)
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(Color(red: 0.812, green: 0.878, blue: 0.961))
+            if !live.isEmpty {
+                railSection("🔴  ĐANG ĐÁ", live)
+            }
+            if !upcoming.isEmpty {
+                railSection("⏰  SẮP ĐÁ", upcoming)
+            }
+            if !rest.isEmpty {
+                railSection("📺  KHÁC", rest)
+            }
+        }
+    }
+
+    /// The cups tab (spec §4.1): three labelled sections — CÚP C1
+    /// (gold), CÚP C2, CÚP C3 — each live → upcoming → rest, plus
+    /// the addon's own cup events (S2) in their sections. A
+    /// section with no fixtures is omitted entirely.
+    @ViewBuilder
+    private var cupBody: some View {
+        let now = Date()
+        VStack(alignment: .leading, spacing: 22) {
+            heroPanel
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 30) {
+                    cupSection(.championsLeague,
+                               fixtures: entries.filter {
+                                   $0.competition == .championsLeague
+                                       || $0.competition == .womensChampionsLeague
+                               },
+                               addon: nuvioCupEvents.filter {
+                                   DivisionClassifier.competition(forNuvioLeagueLine: $0.league) == .championsLeague
+                                       || DivisionClassifier.competition(forNuvioLeagueLine: $0.league) == .womensChampionsLeague
+                               }, now: now)
+                    cupSection(.europaLeague,
+                               fixtures: entries.filter { $0.competition == .europaLeague },
+                               addon: nuvioCupEvents.filter {
+                                   DivisionClassifier.competition(forNuvioLeagueLine: $0.league) == .europaLeague
+                               }, now: now)
+                    cupSection(.conferenceLeague,
+                               fixtures: entries.filter { $0.competition == .conferenceLeague },
+                               addon: nuvioCupEvents.filter {
+                                   DivisionClassifier.competition(forNuvioLeagueLine: $0.league) == .conferenceLeague
+                               }, now: now)
+                    footerRow
+                }
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func cupSection(_ competition: CompetitionID, fixtures: [TVFixtureEntry],
+                            addon: [NuvioItem], now: Date) -> some View {
+        if !fixtures.isEmpty || !addon.isEmpty {
+            let live = fixtures.filter { store.effectiveBucket(of: $0.channel, now: now) == 0 }
+            let upcoming = fixtures.filter {
+                let b = store.effectiveBucket(of: $0.channel, now: now)
+                return b == 1 || b == 2
+            }
+            let rest = fixtures.filter { store.effectiveBucket(of: $0.channel, now: now) == 3 }
+            VStack(alignment: .leading, spacing: 30) {
+                Text(competition.label)
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(competition == .championsLeague
+                        ? TVPalette.c1Head : .white)
+                if !live.isEmpty {
+                    railSection("🔴  ĐANG ĐÁ", live)
+                }
+                if !upcoming.isEmpty {
+                    railSection("⏰  SẮP ĐÁ", upcoming)
+                }
+                if !rest.isEmpty {
+                    railSection("📺  KHÁC", rest)
+                }
+                if !addon.isEmpty {
+                    nuvioEventRail("📺  NUVIO · " + competition.label, addon)
+                }
+            }
+        }
+    }
+
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.4.0")
+            Text("Đá Banh TV v1.4.1")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -864,7 +1145,7 @@ struct TVContentView: View {
         } label: {
             HStack(alignment: .center, spacing: 36) {
                 VStack(alignment: .leading, spacing: 14) {
-                    heroBadge(entry.channel)
+                    heroBadge(for: entry)
                     Text(entry.headline)
                         .font(.system(size: 46, weight: .bold))
                         .foregroundStyle(.white)
@@ -973,13 +1254,28 @@ struct TVContentView: View {
         .focused($focusedKey, equals: "heroEN:" + ch.url)
     }
 
-    private func heroBadge(_ ch: Channel) -> some View {
+    /// The fixture hero's badge with the matched state consulted
+    /// (spec §1.4/§1.5): source minute verbatim, HT wording, or
+    /// FT + final score — never PHÁT LẠI for a known FT.
+    private func heroBadge(for entry: TVFixtureEntry) -> some View {
+        heroBadgeText(bucket: store.effectiveBucket(of: entry.channel),
+                      channel: entry.channel, state: entry.state)
+    }
+
+    private func heroBadgeText(bucket: Int, channel ch: Channel,
+                               state: MatchState?) -> some View {
         let now = Date()
-        let bucket = LeagueClassifier.bucket(of: ch, now: now)
         let text: String
         let color: Color
-        if bucket == 0 {
-            text = "🔴 ĐANG ĐÁ · \(TVKickoffFormat.liveMinute(of: ch.kickoff ?? now, now: now))'"
+        if let state, state.status == .ft {
+            text = "FT" + (state.scoreText.map { " · " + $0 } ?? "")
+            color = Color(red: 0.38, green: 0.38, blue: 0.42)
+        } else if let state, state.status == .live || state.status == .ht {
+            text = "🔴 ĐANG ĐÁ · " + (state.badgeText ?? "")
+            color = TVPalette.liveRed
+        } else if bucket == 0 {
+            text = "🔴 ĐANG ĐÁ · " + (MatchStateStore.computedBadge(kickoff: ch.kickoff ?? now, now: now)
+                ?? "\(TVKickoffFormat.liveMinute(of: ch.kickoff ?? now, now: now))'")
             color = TVPalette.liveRed
         } else if let kickoff = ch.kickoff, kickoff > now {
             text = "⏰ " + TVKickoffFormat.timeDay.string(from: kickoff)
@@ -1039,7 +1335,11 @@ struct TVContentView: View {
                         Button {
                             play(entry)
                         } label: {
-                            TVFeaturedCard(entry: entry, focused: focusedKey == "feat:" + entry.id)
+                            if entry.isLive {
+                                TVLiveBoardView(entry: entry, focused: focusedKey == "feat:" + entry.id)
+                            } else {
+                                TVFeaturedCard(entry: entry, focused: focusedKey == "feat:" + entry.id)
+                            }
                         }
                         .tvCardButton()
                         .focused($focusedKey, equals: "feat:" + entry.id)
@@ -1062,7 +1362,11 @@ struct TVContentView: View {
                         Button {
                             play(entry)
                         } label: {
-                            TVMatchCard(entry: entry, focused: focusedKey == "rail:" + entry.id)
+                            if entry.isLive {
+                                TVLiveBoardView(entry: entry, focused: focusedKey == "rail:" + entry.id)
+                            } else {
+                                TVMatchCard(entry: entry, focused: focusedKey == "rail:" + entry.id)
+                            }
                         }
                         .tvCardButton()
                         .focused($focusedKey, equals: "rail:" + entry.id)
@@ -1083,7 +1387,15 @@ struct TVContentView: View {
     /// (PlaylistStore.resolution(for:)). A fixture the pin
     /// pre-resolved resolves from the cache instead, so the
     /// priority match is also the fastest to open.
+    /// A fixture tap opens the fixture's link board (1.4.1,
+    /// spec §2.1): VN rows are the store's ladder set for the
+    /// fixture (sources(for:), representative first), EN rows
+    /// are only this fixture's own attached Nuvio events
+    /// (fail-closed attach above) — the board is the only place
+    /// the VN/EN choice is made, and a board row tap plays.
     private func play(_ entry: TVFixtureEntry) {
-        playRequest = PlayRequest(resolution: store.resolution(for: entry.channel))
+        boardRequest = BoardRequest(entry: entry,
+                                    vnSources: store.sources(for: entry.channel),
+                                    enItems: attachedNuvioEvents(for: entry))
     }
 }

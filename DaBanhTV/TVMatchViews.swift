@@ -65,6 +65,15 @@ struct TVFixtureEntry: Identifiable {
     let channel: Channel
     let sourceCount: Int
     let id: String
+    /// Matched live state (1.4.1, spec §1) — attached by the view
+    /// from PlaylistStore.matchState(for:) after grouping; nil
+    /// for an unmatched fixture (board shows the bounded computed
+    /// clock and NO score, never a fabricated one).
+    var state: MatchState? = nil
+    /// Competition identity (spec §3/§4): S1 matched-state slug,
+    /// else S3 both-clubs lower division, else nil (unknown →
+    /// top section of the country tab).
+    var competition: CompetitionID? = nil
 
     /// Cleaned title — the only title form the UI ever shows.
     var cleanTitle: String { MatchTitle.clean(channel.title) }
@@ -84,7 +93,37 @@ struct TVFixtureEntry: Identifiable {
         return cleanTitle
     }
 
-    var isLive: Bool { LeagueClassifier.isLive(channel) }
+    /// Live with the matched state consulted first (spec §1.4):
+    /// a matched live/HT state is live even past +125 min; an FT
+    /// or not-started state is not live even inside the window.
+    var isLive: Bool {
+        if let state {
+            switch state.status {
+            case .live, .ht: return true
+            case .ft, .pre, .postponed, .cancelled: return false
+            }
+        }
+        return LeagueClassifier.isLive(channel)
+    }
+
+    /// The board's badge text: the matched state's verbatim
+    /// minute / HT wording / FT, else the bounded computed clock
+    /// (spec §1.4), else nil.
+    var badgeText: String? {
+        if let state, let badge = state.badgeText { return badge }
+        if state?.status == .ft { return "FT" }
+        guard isLive, let kickoff = channel.kickoff else { return nil }
+        return MatchStateStore.computedBadge(kickoff: kickoff)
+    }
+
+    /// Competition label for boards and heroes: the identified
+    /// competition when there is one, else the league tab name.
+    var competitionLabel: String {
+        competition?.label ?? leagueName.uppercased()
+    }
+
+    var isLowerDivision: Bool { competition?.isLower == true }
+    var isCupFixture: Bool { competition?.isCup == true }
 
     var leagueName: String {
         League(rawValue: channel.leagueRank)?.name ?? "Khác"
@@ -200,6 +239,30 @@ enum TVEnglish {
 /// the general TV app, so the three are never confused.
 enum TVPalette {
     static let cyan = Color(red: 0.0, green: 0.898, blue: 1.0)
+    // Scoreboard tokens (spec §0 — the approved prototype's exact
+    // palette; the board is a new surface with its own colours,
+    // the app's teal identity above is untouched elsewhere).
+    static let boardBG = Color(red: 0.039, green: 0.067, blue: 0.125)      // #0A1120
+    static let boardSky = Color(red: 0.220, green: 0.741, blue: 0.973)     // #38BDF8
+    static let tileBG = Color(red: 0.067, green: 0.114, blue: 0.200)       // #111D33
+    static let tileBorder = Color(red: 0.133, green: 0.208, blue: 0.353)   // #22355A
+    static let tileFocusedBG = Color(red: 0.078, green: 0.149, blue: 0.247) // #14263F
+    static let leagueTx = Color(red: 0.494, green: 0.576, blue: 0.710)     // #7E93B5
+    static let minuteRed = Color(red: 0.761, green: 0.149, blue: 0.149)    // #C22626
+    static let htAmber = Color(red: 0.541, green: 0.427, blue: 0.122)      // #8A6D1F
+    static let liveDot = Color(red: 0.937, green: 0.267, blue: 0.267)      // #EF4444
+    static let teamTx = Color(red: 0.933, green: 0.957, blue: 0.988)       // #EEF4FC
+    static let dashTx = Color(red: 0.329, green: 0.455, blue: 0.624)       // #54749F
+    static let eventsLine = Color(red: 0.114, green: 0.173, blue: 0.286)   // #1D2C49
+    static let evTx = Color(red: 0.663, green: 0.737, blue: 0.851)         // #A9BCD9
+    static let evMin = Color(red: 0.910, green: 0.933, blue: 0.969)        // #E8EEF7
+    static let cardY = Color(red: 0.961, green: 0.773, blue: 0.094)        // #F5C518
+    static let cardR = Color(red: 0.878, green: 0.204, blue: 0.169)        // #E0342B
+    static let c1TileBG = Color(red: 0.086, green: 0.102, blue: 0.180)     // #161A2E
+    static let c1Border = Color(red: 0.290, green: 0.267, blue: 0.122)     // #4A441F
+    static let c1Gold = Color(red: 1.0, green: 0.843, blue: 0.416)         // #FFD76A
+    static let c1Head = Color(red: 1.0, green: 0.914, blue: 0.659)         // #FFE9A8
+    static let c1Label = Color(red: 0.788, green: 0.698, blue: 0.412)      // #C9B269
     static let tealFill = Color(red: 0.05, green: 0.36, blue: 0.30)
     static let liveRed = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let amber = Color(red: 1.0, green: 0.78, blue: 0.35)
@@ -212,11 +275,28 @@ enum TVPalette {
 /// / slate 📺 KÊNH. Same language as the phone, sized for TV.
 struct TVStatusChip: View {
     let channel: Channel
+    /// Matched live state when the caller has one (1.4.1): the
+    /// chip then shows the source's own minute / FT + score
+    /// instead of the wall-clock minute (spec §1.4).
+    var state: MatchState? = nil
 
     var body: some View {
         let now = Date()
         let bucket = LeagueClassifier.bucket(of: channel, now: now)
-        if bucket == 0 {
+        if let state, state.status == .ft {
+            Text("FT" + (state.scoreText.map { " · " + $0 } ?? ""))
+                .font(.system(size: 19, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.75))
+        } else if let state, state.status == .live || state.status == .ht {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(TVPalette.liveRed)
+                    .frame(width: 13, height: 13)
+                Text("LIVE · " + (state.badgeText ?? ""))
+                    .font(.system(size: 19, weight: .heavy))
+                    .foregroundStyle(TVPalette.liveRed)
+            }
+        } else if bucket == 0 {
             HStack(spacing: 7) {
                 Circle()
                     .fill(TVPalette.liveRed)
@@ -522,7 +602,19 @@ struct TVFeaturedCard: View {
             }
         }
         .padding(28)
-        .frame(width: 640, height: 330, alignment: .leading)
+        // Featured fit fix (2026-11-19, with Sony 2.21): width
+        // 640 -> 592pt. The featured rail is a 3-across row like
+        // the board rails (root padding 32, rail insets 8+8,
+        // spacing 28 -> usable 1840pt), and at 640 the third
+        // featured tile overflowed: 3*640 + 2*28 = 1976 > 1840,
+        // its last 96pt past the screen edge — the same defect
+        // the owner photographed on Sony 2.20's featured rail.
+        // At 592 the tile matches the live board's width:
+        // 3*592 + 2*28 = 1832 <= 1840, third tile fully on
+        // screen. Height unchanged; internals are flexible
+        // (teamBlock is maxWidth .infinity), nothing inside
+        // assumes 640.
+        .frame(width: 592, height: 330, alignment: .leading)
         .background(tvCardBackground(focused: focused))
     }
 
@@ -536,6 +628,187 @@ struct TVFeaturedCard: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+
+// MARK: - Live scoreboard tile (1.4.1, spec §0/§1.5)
+
+/// The big-score board: one live fixture as the approved
+/// prototype draws it — competition label + minute/status badge
+/// on top, crest+name | BIG CENTRED SCORE | name+crest, then the
+/// event lines under a divider (scorers with minutes, card glyphs
+/// with minutes). Geometry is the prototype's at TV scale (score
+/// 69 pt, team names 24 pt, events 19 pt, tile 592 pt wide in
+/// the 3-across row — 606 until the 2026-11-19 fit fix narrowed
+/// it 14 pt so the third tile fits the screen whole; the type
+/// sizes, which carry the owner's not-shrunk ruling for his
+/// father's smaller TV, are unchanged). A fixture with no matched
+/// state renders the same shape with the bounded computed clock
+/// in the badge and NO score and NO event lines — nothing is
+/// ever fabricated (spec §0/§1.4). C1 fixtures carry the gold
+/// variant; C2/C3 use the standard board (spec §4.1 / plan
+/// §0.4 reading). Focus follows the app's standing cure: the
+/// custom button style adds nothing and the board's own focused
+/// face (focused fill + SKY/gold border) is the only layer —
+/// the OS platter never fights it (spec §5.2-10).
+struct TVLiveBoardView: View {
+    @EnvironmentObject private var store: PlaylistStore
+    let entry: TVFixtureEntry
+    let focused: Bool
+
+    private var isGold: Bool {
+        entry.competition == .championsLeague || entry.competition == .womensChampionsLeague
+    }
+
+    var body: some View {
+        let _ = store.crestsRevision
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(entry.competitionLabel)
+                    .font(.system(size: 19, weight: .bold))
+                    .tracking(1)
+                    .foregroundStyle(isGold ? TVPalette.c1Label : TVPalette.leagueTx)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                badge
+            }
+            scoreRow
+            if let state = entry.state, !state.events.isEmpty {
+                eventsBlock(state)
+            }
+        }
+        .padding(20)
+        // Fit fix (2026-11-19, with Sony 2.20): width 606 -> 592pt.
+        // At the old 60pt root padding the usable row width was
+        // 1920 - 2*60 - 2*8 = 1784 against 3*606 + 2*28 = 1874 —
+        // the third board overflowed by 90pt and was cut at the
+        // right edge (the same defect the owner photographed on
+        // Sony 2.19). Padding 32 alone still left 34pt over, so
+        // the board narrows too: usable = 1920 - 2*32 - 2*8 =
+        // 1840; 3*592 + 2*28 = 1832 <= 1840, third board fully on
+        // screen. Height unchanged; the focus ring is strokeBorder
+        // (inside the frame), so a fully-visible frame means a
+        // fully-visible ring.
+        .frame(width: 592, height: 342, alignment: .topLeading)
+        .background(boardBackground)
+    }
+
+    private var badge: some View {
+        let isHT = entry.state?.status == .ht
+            || entry.badgeText == "NGHỈ GIỮA HIỆP"
+        return Group {
+            if let text = entry.badgeText {
+                Text(text)
+                    .font(.system(size: 25, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(isHT ? TVPalette.htAmber : TVPalette.minuteRed))
+            } else if entry.state?.status == .postponed || entry.state?.status == .cancelled {
+                Text("HOÃN")
+                    .font(.system(size: 25, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(red: 0.38, green: 0.38, blue: 0.42)))
+            }
+        }
+    }
+
+    private var scoreRow: some View {
+        HStack(alignment: .center, spacing: 10) {
+            teamColumn(name: entry.teams?.0, crest: entry.crests?.0 ?? nil)
+            scoreCentre
+            teamColumn(name: entry.teams?.1, crest: entry.crests?.1 ?? nil)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func teamColumn(name: String?, crest: URL?) -> some View {
+        VStack(spacing: 8) {
+            TVCrestImage(url: crest, size: 52)
+            Text(name ?? entry.cleanTitle)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(TVPalette.teamTx)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var scoreCentre: some View {
+        if let state = entry.state, let h = state.scoreHome, let a = state.scoreAway {
+            HStack(spacing: 10) {
+                Text("\(h)")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(.white)
+                Text("-")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(TVPalette.dashTx)
+                Text("\(a)")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        } else {
+            // Unmatched: the prototype's face-off shape — crests
+            // and names only, no digits of any kind.
+            Text("VS")
+                .font(.system(size: 30, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.45))
+        }
+    }
+
+    private func eventsBlock(_ state: MatchState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Rectangle()
+                .fill(TVPalette.eventsLine)
+                .frame(height: 1)
+            HStack(alignment: .top, spacing: 16) {
+                eventColumn(events: state.events.filter { $0.isHome }, alignRight: false)
+                eventColumn(events: state.events.filter { !$0.isHome }, alignRight: true)
+            }
+        }
+    }
+
+    private func eventColumn(events: [MatchEvent], alignRight: Bool) -> some View {
+        VStack(alignment: alignRight ? .trailing : .leading, spacing: 4) {
+            ForEach(Array(events.prefix(3).enumerated()), id: \.offset) { _, event in
+                HStack(spacing: 7) {
+                    if event.kind != .goal {
+                        RoundedRectangle(cornerRadius: 2.5)
+                            .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
+                            .frame(width: 12, height: 16)
+                    }
+                    Text(event.playerName)
+                        .font(.system(size: 19))
+                        .foregroundStyle(TVPalette.evTx)
+                        .lineLimit(1)
+                    Text(event.minuteText)
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(TVPalette.evMin)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
+    }
+
+    private var boardBackground: some View {
+        RoundedRectangle(cornerRadius: 17)
+            .fill(isGold ? TVPalette.c1TileBG : (focused ? TVPalette.tileFocusedBG : TVPalette.tileBG))
+            .overlay(
+                RoundedRectangle(cornerRadius: 17)
+                    .strokeBorder(
+                        focused ? (isGold ? TVPalette.c1Gold : TVPalette.boardSky)
+                                : (isGold ? TVPalette.c1Border : TVPalette.tileBorder),
+                        lineWidth: focused ? 4 : 2))
     }
 }
 
@@ -560,7 +833,7 @@ struct TVMatchCard: View {
             HStack(alignment: .center, spacing: 10) {
                 TVCrestRow(channel: channel)
                 Spacer()
-                TVStatusChip(channel: channel)
+                TVStatusChip(channel: channel, state: entry.state)
             }
             Text(entry.headline)
                 .font(.system(size: 26, weight: .semibold))

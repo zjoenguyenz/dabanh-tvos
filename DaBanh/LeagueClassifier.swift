@@ -35,7 +35,7 @@ enum LeagueClassifier {
     private static let spain = ["tây ban nha", "la liga", "real madrid", "barcelona", "atlético", "atletico", "sevilla", "valencia cf", "real sociedad", "athletic", "real betis", "betis", "villarreal", "celta", "getafe", "espanyol", "mallorca", "osasuna", "rayo", "girona", "alavés", "alaves", "las palmas", "leganés", "leganes", "valladolid"]
     private static let england = ["ngoại hạng", "premier league", "arsenal", "chelsea", "liverpool", "manchester", "man utd", "man city", "tottenham", "newcastle", "aston villa", "west ham", "brighton", "everton", "wolves", "fulham", "brentford", "crystal palace", "nottingham", "leicester", "ipswich", "southampton", "bournemouth"]
     private static let italy = ["serie a", "napoli", "internazionale", "inter milan", "ac milan", "juventus", "as roma", "lazio", "atalanta", "fiorentina", "bologna", "torino", "como", "udinese", "genoa", "cagliari", "parma", "sassuolo", "verona", "lecce"]
-    private static let france = ["ligue 1", "paris saint", "psg", "marseille", "monaco", "lille ", "losc", "olympique lyon", "lyon", "ogc nice", "nice", "lens", "rennes", "strasbourg", "toulouse", "brestois", "brest", "nantes", "angers", "auxerre", "le havre", "metz", "lorient", "le mans"]
+    private static let france = ["ligue 1", "paris saint", "psg", "marseille", "monaco", "lille ", "losc", "olympique lyon", "lyon", "ogc nice", "nice", "lens", "rennes", "strasbourg", "toulouse", "brestois", "brest", "nantes", "angers sco", "auxerre", "le havre", "metz", "lorient", "le mans"]
     // Note: no bare "kiel" — it is a substring of "Kielce"
     // (Korona Kielce, Poland), which tonight's addon data
     // proved it steals; "holstein" alone carries Holstein
@@ -113,6 +113,12 @@ enum LeagueClassifier {
     /// rawValues are 1, 2, 3, 4, 5 and 9; PlaylistStore uses 0 for the
     /// Hot tab and -1 for Trực tiếp, so -2 is free).
     static let enTabValue = -2
+
+    /// selectedLeague value meaning "the European cups tab"
+    /// (1.4.1, spec §4.1): the League.cups rawValue (6) — C1/C2/C3
+    /// sections for fixtures a source positively identifies as
+    /// cup fixtures (spec §4.2 S1/S2 only; never club pools).
+    static let cupTabValue = 6
 
     /// True for a channel from the English-commentary block. These
     /// channels carry no kickoff, so the bucket sort parks them in
