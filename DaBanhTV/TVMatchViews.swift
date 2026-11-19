@@ -254,7 +254,13 @@ struct TVPillFace: View {
 /// unchanged — same placeholder while loading, same scaledToFit
 /// image when loaded.
 private enum TVImageCache {
-    static let cache = NSCache<NSURL, UIImage>()
+    // Swift 6: nonisolated(unsafe) — NSCache is thread-safe by design
+    // (Apple documents adding, removing and querying items from
+    // different threads without locking the cache yourself), and
+    // load() reads/writes it across await suspension points, off the
+    // main actor. The cache instance itself is never mutated or
+    // replaced after init — only its contents change, inside NSCache.
+    nonisolated(unsafe) static let cache = NSCache<NSURL, UIImage>()
     static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024,
