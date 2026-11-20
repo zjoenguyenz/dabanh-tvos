@@ -383,6 +383,13 @@ final class PlaylistStore: ObservableObject {
         liveStore.state(for: ch)
     }
 
+    /// Board-open FotMob detail upgrade (spec §1.2; 1.4.4):
+    /// forwarded to the live store, which owns the guards and
+    /// the detail cache.
+    func requestBoardDetail(for state: MatchState) {
+        liveStore.requestBoardDetail(for: state)
+    }
+
     /// The fixture's competition identity (plan §3.5): rule 1, a
     /// matched state's competition, wins; rule 2, the both-clubs
     /// lower-division test, files unmatched fixtures; otherwise

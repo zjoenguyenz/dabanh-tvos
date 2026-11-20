@@ -959,7 +959,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.4.3")
+            Text("Đá Banh TV v1.4.4")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -1219,7 +1219,7 @@ struct TVContentView: View {
                 // panel's trailing edge and the second crest was cut
                 // off on the owner's TV (v1.2.3 live test).
                 .frame(width: 1020, alignment: .leading)
-                fixtureHeroArt(entry.channel)
+                fixtureHeroArt(entry)
             }
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
@@ -1334,8 +1334,12 @@ struct TVContentView: View {
     }
 
     @ViewBuilder
-    private func fixtureHeroArt(_ ch: Channel) -> some View {
-        if let pair = Crests.crests(forTitle: ch.title), pair.0 != nil || pair.1 != nil {
+    private func fixtureHeroArt(_ entry: TVFixtureEntry) -> some View {
+        let ch = entry.channel
+        // 1.4.4: the hero draws the entry's displayCrests (map
+        // pair + the bound ESPN state's per-side fallback), not
+        // the bare map pair — same rule as the tiles.
+        if let pair = entry.displayCrests, pair.0 != nil || pair.1 != nil {
             HStack(spacing: 22) {
                 TVCrestImage(url: pair.0, size: 160)
                 Text("VS")

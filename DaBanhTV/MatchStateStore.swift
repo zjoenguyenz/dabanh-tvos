@@ -60,6 +60,19 @@ struct MatchState: Equatable, Sendable {
     /// FotMob match id, when the state came from FotMob (detail
     /// upgrades ride on it).
     let fotmobID: Int?
+    /// ESPN's own display names + crest URLs for the two sides
+    /// (1.4.4, item 1 — the Sony 2.24 mechanism): the ESPN
+    /// payload carries a real logo per team, but until now the
+    /// parser dropped both, so a club missing from every crest
+    /// map (the Orlando City / FC Cincinnati class) showed no
+    /// crest anywhere. Non-nil ONLY on ESPN states; the display
+    /// layer may fall back to these per side, fail-closed, via
+    /// espnLogo(forTeamName:). Names are display metadata only —
+    /// binding never reads them.
+    let homeName: String?
+    let awayName: String?
+    let logoHome: String?
+    let logoAway: String?
 
     var storageKey: String { pairKey + "|" + dateKey }
     var goals: [MatchEvent] { events.filter { $0.kind == .goal } }
@@ -92,7 +105,35 @@ struct MatchState: Equatable, Sendable {
                    scoreHome: scoreHome, scoreAway: scoreAway,
                    events: newEvents,
                    source: source, fetchedAt: fetchedAt, kickoff: kickoff,
-                   fotmobID: fotmobID)
+                   fotmobID: fotmobID,
+                   homeName: homeName, awayName: awayName,
+                   logoHome: logoHome, logoAway: logoAway)
+    }
+
+    /// The ESPN crest URL for ONE side of this fixture (1.4.4):
+    /// non-nil ONLY when this state came from ESPN, the given
+    /// team name canonicalises (MatchPairKey.canonicalTeam — the
+    /// same key the binder uses) to the same key as that side's
+    /// ESPN display name, and the payload's logo for that side
+    /// is a non-empty http(s) URL. Every other case returns nil
+    /// and the caller keeps the shield — a logo is never guessed
+    /// from an unbound or mismatched state.
+    func espnLogo(forTeamName name: String) -> URL? {
+        guard source == .espn else { return nil }
+        let key = MatchPairKey.canonicalTeam(name)
+        guard !key.isEmpty else { return nil }
+        let raw: String?
+        if let homeName, key == MatchPairKey.canonicalTeam(homeName) {
+            raw = logoHome
+        } else if let awayName, key == MatchPairKey.canonicalTeam(awayName) {
+            raw = logoAway
+        } else {
+            raw = nil
+        }
+        guard let raw, let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        return url
     }
 }
 
@@ -193,6 +234,10 @@ final class MatchStateStore: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var fetching = false
     private var fotmobDetailCache: [Int: [MatchEvent]] = [:]
+    /// FotMob ids with a board-open detail fetch in flight
+    /// (1.4.4): repeated board opens must not spawn duplicate
+    /// fetches for the same match.
+    private var boardDetailInFlight: Set<Int> = []
 
     private static let livePoll: TimeInterval = 60
     private static let idlePoll: TimeInterval = 15 * 60
@@ -217,6 +262,54 @@ final class MatchStateStore: ObservableObject {
     /// A playlist refresh also triggers a state fetch (plan §1.7).
     func requestFetch() {
         Task { await cycle() }
+    }
+
+    /// On-demand FotMob detail upgrade for the fixture whose
+    /// link board is open (spec §1.2: matchDetails is fetched
+    /// on demand only — the cycle's capped pass covers live
+    /// fixtures generally; the board-open fixture is the spec's
+    /// second named case, and 1.4.3 never wired it, so a board
+    /// could sit on an event-less FotMob state until the cap
+    /// race reached it). Same discipline as the cycle pass:
+    /// FotMob states only, events still empty, the detail cache
+    /// shared, and the write-back re-reads the CURRENT stored
+    /// state and upgrades only that same FotMob state — a
+    /// fresher cycle state (or an ESPN state that has since won
+    /// the key) is never clobbered.
+    func requestBoardDetail(for state: MatchState) {
+        guard state.source == .fotmob, state.events.isEmpty,
+              let fid = state.fotmobID,
+              !boardDetailInFlight.contains(fid) else { return }
+        // A cached EMPTY result means the detail endpoint has
+        // already answered "no events" for this match: applying
+        // it again could only rewrite an equal state and write
+        // another log line, so it is not re-applied. A cached
+        // non-empty result applies at once (applyBoardDetail's
+        // own guards make a repeat a no-op).
+        if let cached = fotmobDetailCache[fid] {
+            if !cached.isEmpty {
+                applyBoardDetail(cached, fid: fid, key: state.storageKey)
+            }
+            return
+        }
+        boardDetailInFlight.insert(fid)
+        let key = state.storageKey
+        Task { [weak self] in
+            guard let self else { return }
+            defer { boardDetailInFlight.remove(fid) }
+            if let events = await Self.fetchFotMobDetail(id: fid) {
+                fotmobDetailCache[fid] = events
+                applyBoardDetail(events, fid: fid, key: key)
+            }
+        }
+    }
+
+    private func applyBoardDetail(_ events: [MatchEvent], fid: Int, key: String) {
+        guard let current = states[key], current.source == .fotmob,
+              current.fotmobID == fid, current.events.isEmpty else { return }
+        states[key] = current.withEvents(events)
+        onChange?()
+        DiagLog.write("board", "fotmob detail id=\(fid) events=\(events.count)")
     }
 
     private func hasLiveScope() -> Bool {
@@ -340,11 +433,12 @@ final class MatchStateStore: ObservableObject {
         // requested, and ESPN silently never answered them.
         let days = Self.espnDays(now: now)
         let todayICT = Self.ictDateKey(now)
-        async let espnStates = Self.fetchESPN(slugs: CompetitionID.espnSlugs, days: days)
-        async let fotmobStates = Self.fetchFotMobMerged(now: now)
-        async let flashscoreStates = Self.fetchFlashscore()
-        async let livescoreStates = Self.fetchLiveScore(todayKey: todayICT)
-        let layers = await [espnStates, fotmobStates, flashscoreStates, livescoreStates]
+        async let espnResult = Self.fetchESPN(slugs: CompetitionID.espnSlugs, days: days)
+        async let fotmobResult = Self.fetchFotMobMerged(now: now)
+        async let flashscoreResult = Self.fetchFlashscore()
+        async let livescoreResult = Self.fetchLiveScore(todayKey: todayICT)
+        let results = await [espnResult, fotmobResult, flashscoreResult, livescoreResult]
+        let layers = results.map { $0.states }
 
         // Precedence ESPN > FotMob > Flashscore > LiveScore, wholesale per
         // fixture key (plan §1.4): a lower layer never overwrites
@@ -398,6 +492,13 @@ final class MatchStateStore: ObservableObject {
         DiagLog.write("poll", "espn=\(layers[0].count) fotmob=\(layers[1].count) "
             + "flash=\(layers[2].count) livescore=\(layers[3].count) "
             + "merged=\(next.count) espnDays=\(days.joined(separator: ","))")
+        // 1.4.4, item 3: how each layer's FETCH ended this
+        // cycle — "ok states=N" (answered; N may be 0) is now
+        // distinguishable from "http-403"/"error"/"decode"
+        // (never answered), which the counts line alone cannot
+        // express.
+        DiagLog.write("fetch", "espn: \(results[0].report) · fotmob: \(results[1].report) "
+            + "· flash: \(results[2].report) · livescore: \(results[3].report)")
         if let fixtures = fixturesProvider?() {
             var misses: [String] = []
             for ch in fixtures
@@ -578,7 +679,41 @@ final class MatchStateStore: ObservableObject {
 
     // MARK: - HTTP
 
-    nonisolated private static func get(_ url: URL, headers: [String: String] = [:]) async -> Data? {
+    /// The three ways one HTTP fetch can end (1.4.4, item 3):
+    /// the cycle's fetch-status line exists because the layers
+    /// used to collapse all three into "empty", so the log could
+    /// not tell "the source answered, there was nothing" from
+    /// "the source never answered" (the owner's 1.4.3 log read
+    /// espn=0 fotmob=0 flash=403 with no way to say which zeros
+    /// were health and which were silence).
+    private enum HTTPOutcome {
+        case ok(Data)
+        case http(Int)
+        case failed
+    }
+
+    /// One ESPN board fetch's product: the states it produced
+    /// plus how the fetch itself ended — "ok", "http-<code>",
+    /// "error" (transport) or "decode" (200 but unparseable).
+    private struct BoardFetch: Sendable {
+        let states: [MatchState]
+        let outcome: String
+    }
+
+    /// One FotMob day fetch's product — same contract, keyed.
+    private struct LayerFetch: Sendable {
+        let states: [String: MatchState]
+        let outcome: String
+    }
+
+    /// One layer's whole cycle product: the merged states plus
+    /// the one-line report the fetch log prints.
+    private struct LayerResult: Sendable {
+        let states: [String: MatchState]
+        let report: String
+    }
+
+    nonisolated private static func getDetailed(_ url: URL, headers: [String: String] = [:]) async -> HTTPOutcome {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("Mozilla/5.0 (Linux; Android 14; TV)", forHTTPHeaderField: "User-Agent")
@@ -587,9 +722,22 @@ final class MatchStateStore: ObservableObject {
         config.timeoutIntervalForRequest = 15
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
-        guard let (data, response) = try? await session.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return data
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .failed }
+            return http.statusCode == 200 ? .ok(data) : .http(http.statusCode)
+        } catch {
+            return .failed
+        }
+    }
+
+    /// The pre-1.4.4 seam, kept for the callers that only need
+    /// the bytes (the FotMob detail fetch): exactly getDetailed
+    /// collapsed to nil-on-anything-but-200, so its behaviour is
+    /// unchanged.
+    nonisolated private static func get(_ url: URL, headers: [String: String] = [:]) async -> Data? {
+        if case .ok(let data) = await getDetailed(url, headers: headers) { return data }
+        return nil
     }
 
     // MARK: - ESPN (primary)
@@ -601,6 +749,12 @@ final class MatchStateStore: ObservableObject {
                     struct Team: Decodable {
                         let id: String?
                         let displayName: String?
+                        /// The team's crest URL on ESPN's CDN
+                        /// (1.4.4: captured for the display
+                        /// layer's per-side fallback — every
+                        /// team object in the captured payloads
+                        /// carries one).
+                        let logo: String?
                     }
                     let homeAway: String?
                     let score: String?
@@ -639,25 +793,49 @@ final class MatchStateStore: ObservableObject {
         let events: [Event]?
     }
 
-    nonisolated private static func fetchESPN(slugs: [String], days: [String]) async -> [String: MatchState] {
+    nonisolated private static func fetchESPN(slugs: [String], days: [String]) async -> LayerResult {
         var out: [String: MatchState] = [:]
-        await withTaskGroup(of: [MatchState].self) { group in
+        var okBoards = 0
+        var totalBoards = 0
+        var firstFailure: String? = nil
+        await withTaskGroup(of: BoardFetch.self) { group in
             for slug in slugs {
                 for day in days {
                     group.addTask { await fetchESPNBoard(slug: slug, day: day) }
                 }
             }
-            for await states in group {
-                for s in states { out[s.storageKey] = s }
+            for await board in group {
+                totalBoards += 1
+                if board.outcome == "ok" { okBoards += 1 }
+                else if firstFailure == nil { firstFailure = board.outcome }
+                for s in board.states { out[s.storageKey] = s }
             }
         }
-        return out
+        let report: String
+        if okBoards == totalBoards {
+            report = "ok states=\(out.count) boards=\(okBoards)/\(totalBoards)"
+        } else if okBoards == 0 {
+            report = "\(firstFailure ?? "error") states=0 boards=0/\(totalBoards)"
+        } else {
+            report = "partial states=\(out.count) boards=\(okBoards)/\(totalBoards) "
+                + "fail=\(firstFailure ?? "error")"
+        }
+        return LayerResult(states: out, report: report)
     }
 
-    nonisolated private static func fetchESPNBoard(slug: String, day: String) async -> [MatchState] {
-        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(slug)/scoreboard?dates=\(day)"),
-              let data = await get(url),
-              let board = try? JSONDecoder().decode(ESPNBoard.self, from: data) else { return [] }
+    nonisolated private static func fetchESPNBoard(slug: String, day: String) async -> BoardFetch {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(slug)/scoreboard?dates=\(day)") else {
+            return BoardFetch(states: [], outcome: "error")
+        }
+        let data: Data
+        switch await getDetailed(url) {
+        case .ok(let payload): data = payload
+        case .http(let code): return BoardFetch(states: [], outcome: "http-\(code)")
+        case .failed: return BoardFetch(states: [], outcome: "error")
+        }
+        guard let board = try? JSONDecoder().decode(ESPNBoard.self, from: data) else {
+            return BoardFetch(states: [], outcome: "decode")
+        }
         let competition = CompetitionID(espnSlug: slug)
         var out: [MatchState] = []
         for event in board.events ?? [] {
@@ -715,9 +893,11 @@ final class MatchStateStore: ObservableObject {
                 scoreHome: home.score.flatMap { Int($0) },
                 scoreAway: away.score.flatMap { Int($0) },
                 events: events, source: .espn, fetchedAt: Date(),
-                kickoff: kickoff, fotmobID: nil))
+                kickoff: kickoff, fotmobID: nil,
+                homeName: homeName, awayName: awayName,
+                logoHome: home.team?.logo, logoAway: away.team?.logo))
         }
-        return out
+        return BoardFetch(states: out, outcome: "ok")
     }
 
     // MARK: - FotMob (fallback)
@@ -761,23 +941,46 @@ final class MatchStateStore: ObservableObject {
     /// instant in the playlist's ICT stamp form — the date=
     /// parameter only chooses which of FotMob's files are read,
     /// never how a state binds.
-    nonisolated private static func fetchFotMobMerged(now: Date) async -> [String: MatchState] {
+    nonisolated private static func fetchFotMobMerged(now: Date) async -> LayerResult {
         let utcDay = fotmobDayString(now, calendar: utcCalendar())
         let localDay = fotmobDayString(now, calendar: appCalendar())
         let days = utcDay == localDay ? [utcDay] : [utcDay, localDay]
         var out: [String: MatchState] = [:]
+        var okDays = 0
+        var firstFailure: String? = nil
         for day in days {
-            for (key, state) in await fetchFotMob(day: day) where out[key] == nil {
+            let fetch = await fetchFotMob(day: day)
+            if fetch.outcome == "ok" { okDays += 1 }
+            else if firstFailure == nil { firstFailure = fetch.outcome }
+            for (key, state) in fetch.states where out[key] == nil {
                 out[key] = state
             }
         }
-        return out
+        let report: String
+        if okDays == days.count {
+            report = "ok states=\(out.count) days=\(okDays)/\(days.count)"
+        } else if okDays == 0 {
+            report = "\(firstFailure ?? "error") states=0 days=0/\(days.count)"
+        } else {
+            report = "partial states=\(out.count) days=\(okDays)/\(days.count) "
+                + "fail=\(firstFailure ?? "error")"
+        }
+        return LayerResult(states: out, report: report)
     }
 
-    nonisolated private static func fetchFotMob(day: String) async -> [String: MatchState] {
-        guard let url = URL(string: "https://www.fotmob.com/api/data/matches?date=\(day)"),
-              let data = await get(url),
-              let decoded = try? JSONDecoder().decode(FotMobDay.self, from: data) else { return [:] }
+    nonisolated private static func fetchFotMob(day: String) async -> LayerFetch {
+        guard let url = URL(string: "https://www.fotmob.com/api/data/matches?date=\(day)") else {
+            return LayerFetch(states: [:], outcome: "error")
+        }
+        let data: Data
+        switch await getDetailed(url) {
+        case .ok(let payload): data = payload
+        case .http(let code): return LayerFetch(states: [:], outcome: "http-\(code)")
+        case .failed: return LayerFetch(states: [:], outcome: "error")
+        }
+        guard let decoded = try? JSONDecoder().decode(FotMobDay.self, from: data) else {
+            return LayerFetch(states: [:], outcome: "decode")
+        }
         var out: [String: MatchState] = [:]
         for league in decoded.leagues ?? [] {
             let competition = CompetitionID(fotmobLeague: league.name ?? "", ccode: league.ccode ?? "")
@@ -806,11 +1009,13 @@ final class MatchStateStore: ObservableObject {
                     scoreHome: sh, scoreAway: sa,
                     events: [],
                     source: .fotmob, fetchedAt: Date(),
-                    kickoff: kickoff, fotmobID: m.id)
+                    kickoff: kickoff, fotmobID: m.id,
+                    homeName: nil, awayName: nil,
+                    logoHome: nil, logoAway: nil)
                 out[state.storageKey] = state
             }
         }
-        return out
+        return LayerFetch(states: out, outcome: "ok")
     }
 
     private struct FotMobDetail: Decodable {
@@ -890,10 +1095,19 @@ final class MatchStateStore: ObservableObject {
     ///   nothing is ever guessed. Binding is the same pair-key
     ///   + ICT stamp dateKey discipline as ESPN/FotMob (the
     ///   dateKey derives from the record's own kickoff instant).
-    nonisolated private static func fetchFlashscore() async -> [String: MatchState] {
-        guard let url = URL(string: "https://www.flashscore.com/x/feed/f_1_0_3_en_1"),
-              let data = await get(url, headers: ["x-fsign": "SW9D1eZo"]),
-              let text = String(data: data, encoding: .utf8) else { return [:] }
+    nonisolated private static func fetchFlashscore() async -> LayerResult {
+        guard let url = URL(string: "https://www.flashscore.com/x/feed/f_1_0_3_en_1") else {
+            return LayerResult(states: [:], report: "error states=0")
+        }
+        let data: Data
+        switch await getDetailed(url, headers: ["x-fsign": "SW9D1eZo"]) {
+        case .ok(let payload): data = payload
+        case .http(let code): return LayerResult(states: [:], report: "http-\(code) states=0")
+        case .failed: return LayerResult(states: [:], report: "error states=0")
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            return LayerResult(states: [:], report: "decode states=0")
+        }
         var out: [String: MatchState] = [:]
         var leagueHeader: String? = nil
         for record in text.split(separator: "~", omittingEmptySubsequences: true) {
@@ -932,10 +1146,12 @@ final class MatchStateStore: ObservableObject {
                 scoreHome: sh, scoreAway: sa,
                 events: [],
                 source: .flashscore, fetchedAt: Date(),
-                kickoff: kickoff, fotmobID: nil)
+                kickoff: kickoff, fotmobID: nil,
+                homeName: nil, awayName: nil,
+                logoHome: nil, logoAway: nil)
             out[state.storageKey] = state
         }
-        return out
+        return LayerResult(states: out, report: "ok states=\(out.count)")
     }
 
     // MARK: - LiveScore (fourth layer, score + minute only)
@@ -955,10 +1171,19 @@ final class MatchStateStore: ObservableObject {
         let Stages: [Stage]?
     }
 
-    nonisolated private static func fetchLiveScore(todayKey: String) async -> [String: MatchState] {
-        guard let url = URL(string: "https://prod-public-api.livescore.com/v1/api/app/live/soccer/3?MD=1"),
-              let data = await get(url),
-              let decoded = try? JSONDecoder().decode(LiveScoreFeed.self, from: data) else { return [:] }
+    nonisolated private static func fetchLiveScore(todayKey: String) async -> LayerResult {
+        guard let url = URL(string: "https://prod-public-api.livescore.com/v1/api/app/live/soccer/3?MD=1") else {
+            return LayerResult(states: [:], report: "error states=0")
+        }
+        let data: Data
+        switch await getDetailed(url) {
+        case .ok(let payload): data = payload
+        case .http(let code): return LayerResult(states: [:], report: "http-\(code) states=0")
+        case .failed: return LayerResult(states: [:], report: "error states=0")
+        }
+        guard let decoded = try? JSONDecoder().decode(LiveScoreFeed.self, from: data) else {
+            return LayerResult(states: [:], report: "decode states=0")
+        }
         var out: [String: MatchState] = [:]
         for stage in decoded.Stages ?? [] {
             for e in stage.Events ?? [] {
@@ -985,10 +1210,12 @@ final class MatchStateStore: ObservableObject {
                     status: status, minuteText: minute,
                     scoreHome: e.Tr1, scoreAway: e.Tr2,
                     events: [],
-                    source: .livescore, fetchedAt: Date(), kickoff: nil, fotmobID: nil)
+                    source: .livescore, fetchedAt: Date(), kickoff: nil, fotmobID: nil,
+                    homeName: nil, awayName: nil,
+                    logoHome: nil, logoAway: nil)
                 out[state.storageKey] = state
             }
         }
-        return out
+        return LayerResult(states: out, report: "ok states=\(out.count)")
     }
 }

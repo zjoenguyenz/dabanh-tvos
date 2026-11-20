@@ -66,7 +66,8 @@ struct TVPlayerView: View {
                           onSwitchButton: { openSwitch() },
                           onPlayingURL: { playingURL = $0 },
                           startURL: startURL,
-                          surfaceLocked: switchOpen)
+                          surfaceLocked: switchOpen,
+                          launchedViaSwitch: session > 0)
                 .id(session)
                 // While the overlay is up the surface leaves
                 // the focus environment entirely (review
@@ -296,10 +297,18 @@ private struct PlayerSurface: View {
     /// S1/S2/S3-D2; the shell's .disabled is the SwiftUI half
     /// of the same lock).
     var surfaceLocked: Bool = false
+    /// True when the shell rebuilt this surface for an overlay
+    /// pick (session > 0): the surface's first rung then reports
+    /// kind=switch in the first-frame timing line (1.4.4).
+    var launchedViaSwitch: Bool = false
     @State private var currentURL: String?
     @State private var tried: Set<String> = []
     @State private var exhausted = false
     @State private var switching = true
+    /// When the current rung started loading (1.4.4, item 2):
+    /// stamped by pump() at every rung assignment, consumed by
+    /// handleReady() — nil whenever no rung is in flight.
+    @State private var rungStartedAt: Date?
 
     private var current: ResolvedSource? {
         resolution.sources.first { $0.channel.url == currentURL }
@@ -313,7 +322,7 @@ private struct PlayerSurface: View {
             } else if let current {
                 if current.channel.streamURL != nil {
                     PlayerController(channel: current.channel, onFail: advance,
-                                     onReady: { switching = false },
+                                     onReady: { handleReady() },
                                      showsSwitchButton: showsSwitchButton,
                                      onSwitchButton: onSwitchButton ?? {},
                                      interactionLocked: surfaceLocked)
@@ -379,6 +388,7 @@ private struct PlayerSurface: View {
             if let picked = resolution.sources.first(
                 where: { $0.channel.url == startURL }) {
                 currentURL = picked.channel.url
+                rungStartedAt = Date()
                 switching = true
                 return
             }
@@ -395,12 +405,38 @@ private struct PlayerSurface: View {
         }
         if let next = resolution.sources.first(where: { !tried.contains($0.channel.url) }) {
             currentURL = next.channel.url
+            rungStartedAt = Date()
             switching = true
         } else if resolution.finished {
             exhausted = true
         } else {
             switching = true
         }
+    }
+
+    /// The rung reached readyToPlay (1.4.4, item 2): drop the
+    /// loading capsule — as before — and stamp the rung's
+    /// start→ready time into DiagLog, so a slow source (the
+    /// owner's "English links load quite slowly") is a number
+    /// in the log, not an impression. readyToPlay is the
+    /// picture seam this player already trusts — it is what
+    /// drops the capsule — so the line measures exactly the
+    /// wait the viewer sees. The first rung of a surface
+    /// reports kind=initial, or kind=switch when the shell
+    /// rebuilt the surface for an overlay pick; a rung reached
+    /// after a failure reports kind=advance. A repeat ready
+    /// notification for the same rung logs nothing (the stamp
+    /// is consumed by the first).
+    private func handleReady() {
+        switching = false
+        guard let started = rungStartedAt, let url = currentURL else { return }
+        rungStartedAt = nil
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        let kind = tried.isEmpty
+            ? (launchedViaSwitch ? "switch" : "initial")
+            : "advance"
+        DiagLog.write("player", "first-frame \(ms) ms kind=\(kind) "
+            + "host=\(URL(string: url)?.host ?? "?")")
     }
 
     private func advance() {
@@ -495,6 +531,13 @@ struct TVMatchBoardView: View {
         .onExitCommand { dismiss() }
         .onAppear {
             focusedRow = vnSources.first.map { "vn:" + $0.url }
+            // 1.4.4 (spec §1.2): the board-open fixture earns
+            // its on-demand FotMob detail fetch — the store
+            // guards (FotMob state, events still empty) and
+            // no-ops for every other state.
+            if let state = entry.state {
+                store.requestBoardDetail(for: state)
+            }
         }
         .fullScreenCover(item: $playRequest) { request in
             TVPlayerView(

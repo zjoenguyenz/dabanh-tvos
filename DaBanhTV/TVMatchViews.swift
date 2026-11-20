@@ -85,6 +85,19 @@ struct TVFixtureEntry: Identifiable {
     /// nil when the title is not a fixture at all.
     var crests: (URL?, URL?)? { Crests.crests(forTitle: channel.title) }
 
+    /// The crest pair the tiles actually draw (1.4.4, item 1):
+    /// the crest map first; a side the map misses falls back to
+    /// the logo ESPN published for THIS fixture's bound state
+    /// (MatchState.espnLogo — ESPN states only, canonical-key
+    /// side match, http(s) only, fail-closed). No bound ESPN
+    /// state → exactly the map pair, shields as before.
+    var displayCrests: (URL?, URL?)? {
+        guard let base = crests else { return nil }
+        guard let state, let teams else { return base }
+        return (base.0 ?? state.espnLogo(forTeamName: teams.0),
+                base.1 ?? state.espnLogo(forTeamName: teams.1))
+    }
+
     /// Headline for hero and tiles: "Team A vs Team B" when both
     /// teams are known (no broadcaster clutter survives), else the
     /// cleaned title.
@@ -522,11 +535,25 @@ struct TVSoccerPlaceholder: View {
 /// logo when the title is not a known fixture.
 struct TVCrestRow: View {
     let channel: Channel
+    /// The fixture's bound state, when the caller has one
+    /// (1.4.4: feeds the ESPN-logo fallback in filledPair).
+    var state: MatchState? = nil
     var crestSize: CGFloat = 62
     var logoHeight: CGFloat = 54
 
+    /// The map pair with the 1.4.4 ESPN fallback per missing
+    /// side (same rule as TVFixtureEntry.displayCrests).
+    private var filledPair: (URL?, URL?)? {
+        guard let base = Crests.crests(forTitle: channel.title) else { return nil }
+        guard let state,
+              let teams = Crests.teams(ofCleanTitle: MatchTitle.clean(channel.title))
+        else { return base }
+        return (base.0 ?? state.espnLogo(forTeamName: teams.0),
+                base.1 ?? state.espnLogo(forTeamName: teams.1))
+    }
+
     var body: some View {
-        let pair = Crests.crests(forTitle: channel.title)
+        let pair = filledPair
         if let pair, pair.0 != nil || pair.1 != nil {
             HStack(spacing: 10) {
                 TVCrestImage(url: pair.0, size: crestSize)
@@ -598,12 +625,12 @@ struct TVFeaturedCard: View {
 
             if let teams = entry.teams {
                 HStack(alignment: .top, spacing: 10) {
-                    teamBlock(name: teams.0, crest: entry.crests?.0 ?? nil)
+                    teamBlock(name: teams.0, crest: entry.displayCrests?.0 ?? nil)
                     Text("VS")
                         .font(.system(size: 24, weight: .heavy))
                         .foregroundStyle(.white.opacity(0.45))
                         .padding(.top, 40)
-                    teamBlock(name: teams.1, crest: entry.crests?.1 ?? nil)
+                    teamBlock(name: teams.1, crest: entry.displayCrests?.1 ?? nil)
                 }
             } else {
                 HStack(spacing: 18) {
@@ -772,9 +799,9 @@ struct TVLiveBoardView: View {
 
     private var scoreRow: some View {
         HStack(alignment: .center, spacing: 10) {
-            teamColumn(name: entry.teams?.0, crest: entry.crests?.0 ?? nil)
+            teamColumn(name: entry.teams?.0, crest: entry.displayCrests?.0 ?? nil)
             scoreCentre
-            teamColumn(name: entry.teams?.1, crest: entry.crests?.1 ?? nil)
+            teamColumn(name: entry.teams?.1, crest: entry.displayCrests?.1 ?? nil)
         }
         .frame(maxWidth: .infinity)
     }
@@ -883,7 +910,7 @@ struct TVMatchCard: View {
         let _ = store.crestsRevision
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
-                TVCrestRow(channel: channel)
+                TVCrestRow(channel: channel, state: entry.state)
                 Spacer()
                 TVStatusChip(channel: channel, state: entry.state)
             }
