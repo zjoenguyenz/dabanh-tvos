@@ -390,6 +390,22 @@ final class PlaylistStore: ObservableObject {
         liveStore.requestBoardDetail(for: state)
     }
 
+    /// Hero detail priority (1.4.8, FL-331): the view layer
+    /// registers the fixture the hero panel is showing; the
+    /// live store's cycle pass serves that pair's FotMob
+    /// detail first, and the on-demand request below fires
+    /// the upgrade for the hero's bound state immediately —
+    /// the hero must not wait a full poll cycle (or the
+    /// capped pass's queue) for its scorers and cards.
+    func setHeroDetailPriority(for ch: Channel?) {
+        liveStore.setDetailPriority(for: ch)
+    }
+
+    func requestHeroDetail(for ch: Channel) {
+        guard let state = liveStore.state(for: ch) else { return }
+        liveStore.requestHeroDetail(for: state)
+    }
+
     /// The fixture's competition identity (plan §3.5): rule 1, a
     /// matched state's competition, wins; rule 2, the both-clubs
     /// lower-division test, files unmatched fixtures; otherwise

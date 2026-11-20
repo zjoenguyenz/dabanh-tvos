@@ -466,6 +466,23 @@ struct TVContentView: View {
                 store.cancelPreResolve()
             }
         }
+        .task(id: heroDetailKey) {
+            // Hero detail priority + on-demand upgrade (1.4.8,
+            // FL-331): the fixture in the hero is registered
+            // for the cycle pass's first slot, and when its
+            // bound state is a FotMob state still missing
+            // events the upgrade fires right away — the named-
+            // case treatment the link board has had since
+            // 1.4.4 (spec §1.2), for the one surface that is
+            // always on screen. A non-fixture hero clears the
+            // registration.
+            if case .fixture(let entry) = heroItem {
+                store.setHeroDetailPriority(for: entry.channel)
+                store.requestHeroDetail(for: entry.channel)
+            } else {
+                store.setHeroDetailPriority(for: nil)
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await store.refreshIfStale() }
@@ -499,14 +516,38 @@ struct TVContentView: View {
     }
 
     private func syncHero() {
+        // 1.4.8 (FL-331): re-validate AND refresh. The snapshot
+        // was just rebuilt from the stores' newest data, so a
+        // hero that still exists is re-pointed at the snapshot's
+        // FRESH item for the same identity. The pre-1.4.8 early
+        // return kept the captured item — the hero froze at the
+        // state (and crest pair) it carried when focus last
+        // moved, while the tiles, reading the snapshot, tracked
+        // every poll. This is the hero's half of the chain the
+        // tiles always had: state publish → liveRevision →
+        // dataChanged → rebuildSnapshot → syncHero refresh →
+        // hero re-render, with no focus move involved.
         if isENTab {
             // The addon leads the tab, so the hero defaults to
             // its first item; the old EN block is the fallback
             // hero when the addon has nothing.
             if case .nuvio(let item) = heroItem,
-               (nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels).contains(item) { return }
-            if case .english(let ch) = heroItem, enChannels.contains(ch),
-               !nuvio.hasContent { return }
+               let fresh = (nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels)
+                   .first(where: { $0.id == item.id }) {
+                heroItem = .nuvio(fresh)
+                return
+            }
+            if case .english(let ch) = heroItem,
+               let fresh = enChannels.first(where: { $0.url == ch.url }) {
+                // Refresh by identity alone: the !nuvio.hasContent
+                // condition the pre-1.4.8 keep-branch carried
+                // belongs to DEFAULT selection (below), not to
+                // keeping a hero the owner focused — with it, the
+                // next poll yanked the hero off a focused old-EN
+                // channel card back to the addon's first item.
+                heroItem = .english(fresh)
+                return
+            }
             if let first = nuvio.liveEvents.first ?? nuvio.upcomingEvents.first ?? nuvio.channels.first {
                 heroItem = .nuvio(first)
             } else {
@@ -522,9 +563,16 @@ struct TVContentView: View {
             // league, then its channels — the tab's own rail
             // order.
             if case .nuvio(let item) = heroItem,
-               (leagueLiveEvents + leagueUpcomingEvents + leagueAddonChannels).contains(item) { return }
+               let fresh = (leagueLiveEvents + leagueUpcomingEvents + leagueAddonChannels)
+                   .first(where: { $0.id == item.id }) {
+                heroItem = .nuvio(fresh)
+                return
+            }
             if case .fixture(let current) = heroItem,
-               entries.contains(where: { $0.id == current.id }) { return }
+               let fresh = entries.first(where: { $0.id == current.id }) {
+                heroItem = .fixture(fresh)
+                return
+            }
             if let first = featuredEntries.first ?? entries.first {
                 heroItem = .fixture(first)
             } else if let first = leagueLiveEvents.first ?? leagueUpcomingEvents.first ?? leagueAddonChannels.first {
@@ -534,10 +582,38 @@ struct TVContentView: View {
             }
             return
         }
+        // A Nuvio hero reaches this branch from the cups tab
+        // (foldLeague is nil there): refresh it by identity
+        // from the same pool heroLookup is built from — the
+        // pre-1.4.8 branch knew only fixture heroes, so the
+        // next poll overwrote a focused cup-event hero with
+        // the fixture default, or nil when the tab had no
+        // fixture entries at all.
+        if case .nuvio(let item) = heroItem,
+           let fresh = (nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels
+               + nuvio.leagueChannels.values.flatMap { $0 })
+               .first(where: { $0.id == item.id }) {
+            heroItem = .nuvio(fresh)
+            return
+        }
         if case .fixture(let current) = heroItem,
-           entries.contains(where: { $0.id == current.id }) { return }
+           let fresh = entries.first(where: { $0.id == current.id }) {
+            heroItem = .fixture(fresh)
+            return
+        }
         let first = featuredEntries.first ?? entries.first
         heroItem = first.map { .fixture($0) }
+    }
+
+    /// The hero-detail hook's identity (1.4.8): the hero
+    /// fixture's id plus the shape of its bound state (source,
+    /// FotMob id, events still missing) — the hook re-runs
+    /// when either changes, and the store's guards make a
+    /// re-run with nothing to do a no-op.
+    private var heroDetailKey: String {
+        guard case .fixture(let entry) = heroItem else { return "hero:none" }
+        guard let state = entry.state else { return "hero:\(entry.id):nostate" }
+        return "hero:\(entry.id):\(state.source):\(state.fotmobID ?? -1):\(state.events.isEmpty)"
     }
 
     // MARK: - Chrome
@@ -959,7 +1035,10 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.4.4")
+            // 1.4.8 (FL-331 round): version label read from the bundle, never
+            // a hardcoded literal — a stale literal made screenshots
+            // untraceable to a build (FL-015 lesson).
+            Text("Đá Banh TV v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"))
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -1068,6 +1147,24 @@ struct TVContentView: View {
 
     // MARK: - Hero
 
+    /// 1.4.8 (FL-331): the hero text column's FIXED height —
+    /// one height for every hero shape and every hero kind, so
+    /// a focus move never resizes the panel and nothing below
+    /// it shifts (the FL-109 rule: one fixed frame, never a
+    /// height derived from content). Sized for the fullest
+    /// fixture shape at the fonts in use (line ≈ 1.24 × size):
+    /// badge 40 (21 pt + its vertical padding) + headline 114
+    /// (46 pt × 2 lines) + meta 30 (24 pt) + score block 219
+    /// (score 86 + divider and spacings 25 + four event lines
+    /// 108) + "Xem ngay" 54 (24 pt + padding) + the column's
+    /// four 14-pt spacings 56 ≈ 513 — the constant carries a
+    /// few points of slack, and shorter content leaves the
+    /// space empty at the bottom (the column is top-aligned),
+    /// exactly as iOS's fixed 300×176 board frame leaves its
+    /// events area empty. No animation touches the hero's
+    /// height or content swap.
+    private static let heroColumnHeight: CGFloat = 516
+
     @ViewBuilder
     private var heroPanel: some View {
         switch heroItem {
@@ -1120,7 +1217,8 @@ struct TVContentView: View {
                     .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
                     .padding(.top, 4)
                 }
-                .frame(width: 1020, alignment: .leading)
+                .frame(width: 1020, height: Self.heroColumnHeight,
+                       alignment: .topLeading)
                 nuvioHeroArt(item)
             }
             .padding(.horizontal, 40)
@@ -1221,8 +1319,12 @@ struct TVContentView: View {
                 // Fixed widths on purpose: with a maxWidth-.infinity
                 // text column the crest pair was pushed past the
                 // panel's trailing edge and the second crest was cut
-                // off on the owner's TV (v1.2.3 live test).
-                .frame(width: 1020, alignment: .leading)
+                // off on the owner's TV (v1.2.3 live test). 1.4.8:
+                // the height is fixed too (heroColumnHeight) — the
+                // score/events block lives INSIDE this column, so
+                // it can never widen the column or push the art.
+                .frame(width: 1020, height: Self.heroColumnHeight,
+                       alignment: .topLeading)
                 fixtureHeroArt(entry)
             }
             .padding(.horizontal, 40)
@@ -1347,7 +1449,8 @@ struct TVContentView: View {
                     .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
                     .padding(.top, 4)
                 }
-                .frame(width: 1020, alignment: .leading)
+                .frame(width: 1020, height: Self.heroColumnHeight,
+                       alignment: .topLeading)
                 Group {
                     if ch.logoURL != nil {
                         TVChannelLogo(channel: ch, height: 168)

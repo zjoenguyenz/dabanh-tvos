@@ -226,6 +226,12 @@ final class MatchStateStore: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var fetching = false
     private var fotmobDetailCache: [Int: [MatchEvent]] = [:]
+    /// The pair key of the fixture the hero panel is showing
+    /// (1.4.8): the view layer registers it, the cycle's detail
+    /// pass serves that pair first. The hero is the most
+    /// prominent surface in the app — its events must not wait
+    /// behind unrelated fixtures in the day feed.
+    private var detailPriorityPairKey: String?
     /// FotMob ids with a board-open detail fetch in flight
     /// (1.4.4): repeated board opens must not spawn duplicate
     /// fetches for the same match.
@@ -272,12 +278,14 @@ final class MatchStateStore: ObservableObject {
         guard state.source == .fotmob, state.events.isEmpty,
               let fid = state.fotmobID,
               !boardDetailInFlight.contains(fid) else { return }
-        // A cached EMPTY result means the detail endpoint has
-        // already answered "no events" for this match: applying
-        // it again could only rewrite an equal state and write
-        // another log line, so it is not re-applied. A cached
-        // non-empty result applies at once (applyBoardDetail's
-        // own guards make a repeat a no-op).
+        // A cached EMPTY result is a finished match's final
+        // "no events" answer (1.4.8: empty answers for live
+        // matches are never stored — "no events yet" is not
+        // final while goals can still come): applying it again
+        // could only rewrite an equal state and write another
+        // log line, so it is not re-applied. A cached non-empty
+        // result applies at once (applyBoardDetail's own
+        // guards make a repeat a no-op).
         if let cached = fotmobDetailCache[fid] {
             if !cached.isEmpty {
                 applyBoardDetail(cached, fid: fid, key: state.storageKey)
@@ -290,10 +298,39 @@ final class MatchStateStore: ObservableObject {
             guard let self else { return }
             defer { boardDetailInFlight.remove(fid) }
             if let events = await Self.fetchFotMobDetail(id: fid) {
-                fotmobDetailCache[fid] = events
+                // Same 1.4.8 cache discipline as the cycle
+                // pass: an empty answer is stored only when
+                // the stored state says the match is finished
+                // (a final answer); a live match's empty
+                // answer is applied but never stored.
+                if !events.isEmpty || states[key]?.status == .ft {
+                    fotmobDetailCache[fid] = events
+                }
                 applyBoardDetail(events, fid: fid, key: key)
             }
         }
+    }
+
+    /// Register the hero fixture for detail-upgrade priority
+    /// (1.4.8): the cycle pass sorts this pair's FotMob states
+    /// — winner or donor — ahead of every other candidate.
+    /// Nil clears the priority (the hero shows no fixture).
+    func setDetailPriority(for channel: Channel?) {
+        detailPriorityPairKey = channel.flatMap { pairKey(for: $0) }
+    }
+
+    /// On-demand FotMob detail upgrade for the fixture the
+    /// hero panel is showing (1.4.8, FL-331): the hero is the
+    /// always-visible surface, so it is the board-open case's
+    /// sibling — the fixture the owner is looking at NOW must
+    /// not wait for the cycle's capped pass to reach it. Same
+    /// guards, same cache, same write-back discipline as
+    /// requestBoardDetail (the state passed is the fixture's
+    /// bound state; a non-FotMob winner is refused by the
+    /// shared guard, and the cycle's priority ordering covers
+    /// a FotMob donor sitting under another date key).
+    func requestHeroDetail(for state: MatchState) {
+        requestBoardDetail(for: state)
     }
 
     private func applyBoardDetail(_ events: [MatchEvent], fid: Int, key: String) {
@@ -547,6 +584,18 @@ final class MatchStateStore: ObservableObject {
         // eligible too — the iOS cadence; a 90+' fixture whose
         // FotMob state never earned its scorers/cards was
         // exactly the owner's FL-331 photograph.)
+        // 1.4.8 (FL-331, device video 2026-11-20): two ordering
+        // defects starved the fixture the owner was looking at.
+        // The candidate order fell back to the storage-key
+        // string over the WHOLE merged day feed, so a featured
+        // match waited behind dozens of unrelated fixtures; and
+        // the budget burned on cache applications as well as
+        // fetches, though the plan caps CALLS. Now: the hero
+        // fixture's pair (registered by the view layer) sorts
+        // first — winner or donor, same pair key — then live
+        // before finished, then key; cached events apply FREE
+        // (the iOS RC2 shape: the cap counts fetches only, and
+        // a cached id is never refetched).
         var detailBudget = Self.fotmobDetailCap
         let detailCandidates = merged
             .filter { $0.value.source == .fotmob
@@ -555,19 +604,39 @@ final class MatchStateStore: ObservableObject {
                 && $0.value.events.isEmpty && $0.value.fotmobID != nil }
             .map { $0.key }
             .sorted { a, b in
+                let heroA = merged[a]?.pairKey == detailPriorityPairKey ? 0 : 1
+                let heroB = merged[b]?.pairKey == detailPriorityPairKey ? 0 : 1
+                if heroA != heroB { return heroA < heroB }
                 let liveRankA = (merged[a]?.status == .ft) ? 1 : 0
                 let liveRankB = (merged[b]?.status == .ft) ? 1 : 0
                 if liveRankA != liveRankB { return liveRankA < liveRankB }
                 return a < b
             }
-        for key in detailCandidates where detailBudget > 0 {
+        for key in detailCandidates {
             guard let state = merged[key], let fid = state.fotmobID else { continue }
-            detailBudget -= 1
             if let events = fotmobDetailCache[fid] {
                 merged[key] = state.withEvents(events)
-            } else if let events = await Self.fetchFotMobDetail(id: fid) {
-                fotmobDetailCache[fid] = events
-                merged[key] = state.withEvents(events)
+            } else if detailBudget > 0 {
+                detailBudget -= 1
+                if let events = await Self.fetchFotMobDetail(id: fid) {
+                    // 1.4.8 (FL-331): an EMPTY answer is final
+                    // only for a finished match. For a live one
+                    // it means "no events yet" — caching it
+                    // poisoned the fixture for the whole
+                    // session: the first fetch's empty answer
+                    // made every later cycle re-apply emptiness
+                    // from the cache and never fetch again,
+                    // however many goals followed (the owner's
+                    // Bayern hero: score present, scorers
+                    // missing all match). Empty live answers
+                    // are applied for this cycle (a no-op) but
+                    // never stored, so the fixture stays
+                    // fetch-eligible under the same cap.
+                    if !events.isEmpty || state.status == .ft {
+                        fotmobDetailCache[fid] = events
+                    }
+                    merged[key] = state.withEvents(events)
+                }
             }
         }
         // Staleness guard (KH-3, ĐG-7): a frozen winning layer
