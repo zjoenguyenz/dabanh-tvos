@@ -9,7 +9,8 @@ import SwiftUI
 /// content to the edges so a 3-board row fits whole), nothing
 /// important under 20pt, and a cyan focus ring
 /// thick enough to read across the room. Football identity only —
-/// deep-teal palette and crest-first cards, deliberately unlike
+/// the scoreboard's navy palette (one colour family app-wide
+/// since 1.4.3 KH-7) and crest-first cards, deliberately unlike
 /// the general TV app so the two are never confused.
 ///
 /// v1.3.0 (redesign, 2026-11-14) takes from the iPhone v1.11
@@ -43,7 +44,23 @@ struct TVContentView: View {
     /// tap opens its board first; a board row tap plays.
     @State private var boardRequest: BoardRequest?
     @State private var heroItem: HeroItem?
+    /// Chrome focus ONLY (KH-2, ĐG-1): the tab pills, the header
+    /// action buttons and the hero buttons keep their focus
+    /// state here — those surfaces are cheap. Every CARD's focus
+    /// state moved down into its rail view (TVMatchViews), so a
+    /// focus step inside a rail no longer re-runs this body.
     @FocusState private var focusedKey: String?
+    /// The diagnostic log screen (KH-1).
+    @State private var logOpen = false
+    /// All derived fixture data, computed ONCE per data revision
+    /// (KH-2): body reads this snapshot and nothing else — the
+    /// group + enrich + bucket work happens in rebuildSnapshot()
+    /// when the DATA changes, never when focus moves.
+    @State private var snap = HomeSnapshot()
+    /// The root content width measured at runtime (KH-6): the
+    /// 3-across tile width derives from it, never from an
+    /// assumed 1920.
+    @State private var contentWidth: CGFloat = 0
 
     /// selectedLeague value meaning "the EN section". The store's
     /// own sentinels are 0 (Hot) and -1 (Trực tiếp); -2 is free and
@@ -88,46 +105,12 @@ struct TVContentView: View {
         return raw.filter { !TVEnglish.isEnglish($0) }
     }
 
-    /// The tab's fixtures with the owner's Manchester United pin
-    /// applied (2026-11-19): a live or upcoming MU fixture leads
-    /// the list — and with it the hero default and its bucket
-    /// rail — while every other entry keeps the store's order
-    /// exactly. See TVFixtureEntry.pinnedFirst.
-    private var entries: [TVFixtureEntry] {
-        if isCupTab { return cupEntries }
-        return TVFixtureEntry.pinnedFirst(enriched(TVFixtureEntry.group(tabChannels)))
-    }
-
-    /// Featured rail entries (redesign plan §2.0 — the featured
-    /// rail on Trực tiếp is one of the surfaces the redesign
-    /// leaves unchanged): the first fixtures of the Trực tiếp
-    /// tab, which the store fills with live matches only. Empty
-    /// on every other tab, so the rail — and the hero default
-    /// and focus keys it feeds — exists only there.
-    private var featuredEntries: [TVFixtureEntry] {
-        guard store.selectedLeague == PlaylistStore.liveTabValue else { return [] }
-        return Array(entries.prefix(10))
-    }
-
-    /// The one fixture the Manchester United pin puts first,
-    /// drawn from the whole loaded pool (allEntries — both
-    /// published lists, EN block excluded) rather than the
-    /// current tab's list: the pin is an app-level promise, so
-    /// the pre-resolve hook in body stays keyed on the same pin
-    /// whichever tab he is browsing, and browsing a tab whose
-    /// own list holds no MU fixture never cancels the priority
-    /// match's pre-resolve. Nil when no live or upcoming MU
-    /// fixture is loaded (TVFixtureEntry.manchesterUnitedPin).
-    private var muPinEntry: TVFixtureEntry? {
-        TVFixtureEntry.manchesterUnitedPin(in: allEntries)
-    }
-
     /// Attach each fixture's matched live state + competition
     /// identity (spec §1/§3): the store is the only reader of the
     /// state store; entries carry the result to the views.
+    /// Builder-only since KH-2 — body never calls this.
     private func enriched(_ list: [TVFixtureEntry]) -> [TVFixtureEntry] {
-        let _ = store.liveRevision
-        return list.map { entry in
+        list.map { entry in
             var e = entry
             e.state = store.matchState(for: entry.channel)
             e.competition = store.competition(for: entry.channel)
@@ -137,34 +120,146 @@ struct TVContentView: View {
 
     private var isCupTab: Bool { store.selectedLeague == LeagueClassifier.cupTabValue }
 
-    /// Every fixture in the loaded data (both published lists,
-    /// EN block excluded, URL-deduped) — the pool the cups tab
-    /// and the Nuvio attach read from.
-    private var allEntries: [TVFixtureEntry] {
+    // MARK: - Snapshot (KH-2, ĐG-1)
+
+    /// Everything the body renders, precomputed: the tab's
+    /// fixtures (grouped + enriched + MU-pinned), the featured
+    /// rail, the whole-pool entries, the EN block, the hero
+    /// lookup, the pin, and the current tab's Nuvio slices.
+    /// Rebuilt by rebuildSnapshot() when — and only when — the
+    /// underlying DATA changes (channels, hot channels, live
+    /// revision, selected tab, Nuvio content). In 1.4.2 every
+    /// one of these was a computed property re-evaluated on
+    /// every body pass, and a focus step forced a body pass:
+    /// ~21 group/enrich call sites per step, the measured
+    /// ~1 s lag. Body now reads stored arrays for everything
+    /// the snapshot owns (grouping, enrich, hero lookup — the
+    /// expensive derived data is off the focus path entirely).
+    /// The one classification body still evaluates live is the
+    /// bucket split in scrollBody: effectiveBucket is a
+    /// function of the CURRENT time (the −10/+125 min windows
+    /// move with the clock, not with the data), so it is
+    /// deliberately not snapshotted; its cost is calendar math
+    /// plus a cached pair-key dictionary lookup per entry —
+    /// not the regroup/re-enrich/re-canonicalise chain that
+    /// caused the 1.4.2 lag.
+    private struct HomeSnapshot {
+        var entries: [TVFixtureEntry] = []
+        var featuredEntries: [TVFixtureEntry] = []
+        var allEntries: [TVFixtureEntry] = []
+        var muPinEntry: TVFixtureEntry? = nil
+        var enChannels: [Channel] = []
+        var heroLookup: [String: HeroItem] = [:]
+        var nuvioCupEvents: [NuvioItem] = []
+        var leagueAddonChannels: [NuvioItem] = []
+        var leagueLiveEvents: [NuvioItem] = []
+        var leagueUpcomingEvents: [NuvioItem] = []
+        var hasLeagueAddon = false
+    }
+
+    /// Build the snapshot from the stores' current state. The
+    /// computations are the SAME ones the old computed
+    /// properties ran (same grouping, same enrich, same pin,
+    /// same slices — the KH-2 parity rule: the refactor changes
+    /// WHEN they run, never WHAT they produce).
+    private func rebuildSnapshot() {
+        var s = HomeSnapshot()
+        // Every fixture in the loaded data (both published
+        // lists, EN block excluded, URL-deduped) — the pool the
+        // cups tab and the Nuvio attach read from.
         var seen = Set<String>()
         var pool: [Channel] = []
         for ch in store.channels + store.hotChannels where !TVEnglish.isEnglish(ch) {
             if seen.insert(ch.url).inserted { pool.append(ch) }
         }
-        return enriched(TVFixtureEntry.group(pool))
-    }
-
-    /// The cups tab's fixtures: positively identified cup
-    /// fixtures only (spec §4.2 S1 — a matched state's cup slug;
-    /// club pools are NEVER a classifier, §4.2 S3/R4). Dual
-    /// presence (spec §4.1): they also remain in their country
-    /// tabs — this list is an additional home, not a move.
-    private var cupEntries: [TVFixtureEntry] {
-        allEntries.filter { $0.isCupFixture }
-    }
-
-    /// Nuvio cup events for the cups tab (spec §4.2 S2): addon
-    /// event metas whose competition string EXACTLY names a cup.
-    private var nuvioCupEvents: [NuvioItem] {
-        (nuvio.liveEvents + nuvio.upcomingEvents).filter {
+        s.allEntries = enriched(TVFixtureEntry.group(pool))
+        // The tab's fixtures with the owner's Manchester United
+        // pin applied (2026-11-19): a live or upcoming MU
+        // fixture leads the list — and with it the hero default
+        // and its bucket rail — while every other entry keeps
+        // the store's order exactly. On the cups tab the list
+        // is the positively identified cup fixtures only (spec
+        // §4.2 S1; dual presence §4.1 — an additional home,
+        // not a move).
+        if isCupTab {
+            s.entries = s.allEntries.filter { $0.isCupFixture }
+        } else {
+            s.entries = TVFixtureEntry.pinnedFirst(enriched(TVFixtureEntry.group(tabChannels)))
+        }
+        // Featured rail: the first fixtures of the Trực tiếp
+        // tab only; empty on every other tab.
+        if store.selectedLeague == PlaylistStore.liveTabValue {
+            s.featuredEntries = Array(s.entries.prefix(10))
+        }
+        // The MU pin is drawn from the whole pool, not the
+        // current tab's list (the pin is an app-level promise;
+        // see the pre-resolve hook in body).
+        s.muPinEntry = TVFixtureEntry.manchesterUnitedPin(in: s.allEntries)
+        // The English block, merged from both published lists
+        // and deduplicated by URL.
+        var enSeen = Set<String>()
+        for ch in store.channels + store.hotChannels where TVEnglish.isEnglish(ch) {
+            if enSeen.insert(ch.url).inserted { s.enChannels.append(ch) }
+        }
+        // Nuvio cup events (spec §4.2 S2): addon event metas
+        // whose competition string EXACTLY names a cup.
+        s.nuvioCupEvents = (nuvio.liveEvents + nuvio.upcomingEvents).filter {
             DivisionClassifier.competition(forNuvioLeagueLine: $0.league)?.isCup == true
         }
+        // The selected fold league's addon slices (empty for
+        // Anh / Khác / EN / Trực tiếp / Hot).
+        if let league = foldLeague {
+            s.leagueAddonChannels = nuvio.leagueChannels[league.rawValue] ?? []
+            s.leagueLiveEvents = nuvio.liveEvents.filter {
+                LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
+            }
+            s.leagueUpcomingEvents = nuvio.upcomingEvents.filter {
+                LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
+            }
+        }
+        s.hasLeagueAddon = !s.leagueAddonChannels.isEmpty
+            || !s.leagueLiveEvents.isEmpty || !s.leagueUpcomingEvents.isEmpty
+        // Focus key → hero content, for every focusable card.
+        var map: [String: HeroItem] = [:]
+        for entry in s.featuredEntries { map["feat:" + entry.id] = .fixture(entry) }
+        for entry in s.entries { map["rail:" + entry.id] = .fixture(entry) }
+        for ch in s.enChannels { map["en:" + ch.url] = .english(ch) }
+        for item in nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels {
+            map["nv:" + item.id] = .nuvio(item)
+        }
+        for items in nuvio.leagueChannels.values {
+            for item in items { map["nv:" + item.id] = .nuvio(item) }
+        }
+        s.heroLookup = map
+        snap = s
     }
+
+    /// Every data-input change funnels through here: rebuild
+    /// the snapshot, then re-validate the hero against it.
+    private func dataChanged() {
+        rebuildSnapshot()
+        syncHero()
+    }
+
+    /// A rail reported a focus change (KH-2): the hero follows
+    /// the focused card, exactly as the old root
+    /// .onChange(of: focusedKey) did — but the lookup reads the
+    /// snapshot, and this body does no derived work for it.
+    private func heroFocus(_ key: String) {
+        if let item = snap.heroLookup[key] { heroItem = item }
+    }
+
+    // Snapshot reads — the ONLY form in which body and its
+    // helpers touch fixture data now.
+    private var entries: [TVFixtureEntry] { snap.entries }
+    private var featuredEntries: [TVFixtureEntry] { snap.featuredEntries }
+    private var allEntries: [TVFixtureEntry] { snap.allEntries }
+    private var enChannels: [Channel] { snap.enChannels }
+    private var nuvioCupEvents: [NuvioItem] { snap.nuvioCupEvents }
+    private var leagueAddonChannels: [NuvioItem] { snap.leagueAddonChannels }
+    private var leagueLiveEvents: [NuvioItem] { snap.leagueLiveEvents }
+    private var leagueUpcomingEvents: [NuvioItem] { snap.leagueUpcomingEvents }
+    private var hasLeagueAddon: Bool { snap.hasLeagueAddon }
 
     // MARK: - Nuvio attach (spec §2.5 + owner refinement 13:53 CST)
 
@@ -263,42 +358,13 @@ struct TVContentView: View {
         }
     }
 
-    /// The selected fold league's addon channels: its league
-    /// fold's 24/7 set from the Nuvio store.
-    private var leagueAddonChannels: [NuvioItem] {
-        guard let league = foldLeague else { return [] }
-        return nuvio.leagueChannels[league.rawValue] ?? []
-    }
-
-    /// The selected fold league's addon fixtures: the store's
-    /// live / upcoming events whose headline the shared
-    /// classifier files under this league — the same rule the
-    /// mirror fixtures follow, so a live or hot match of the
-    /// league leads this tab whichever source carries it
-    /// (owner's grouping rule, 2026-11-19 12:59 CST).
-    /// Cross-border cup fixtures keep the first-checked-league
-    /// convention: Bayern vs Arsenal classifies Anh and stays
-    /// out of the Đức tab, exactly as it does in the mirror
-    /// lists.
-    private var leagueLiveEvents: [NuvioItem] {
-        guard let league = foldLeague else { return [] }
-        return nuvio.liveEvents.filter {
-            LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
-        }
-    }
-
-    private var leagueUpcomingEvents: [NuvioItem] {
-        guard let league = foldLeague else { return [] }
-        return nuvio.upcomingEvents.filter {
-            LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
-        }
-    }
-
-    /// True when the selected league tab has any addon
-    /// content to show.
-    private var hasLeagueAddon: Bool {
-        !leagueAddonChannels.isEmpty || !leagueLiveEvents.isEmpty || !leagueUpcomingEvents.isEmpty
-    }
+    /// (The fold league's addon slices — its channels, its live
+    /// and upcoming events by the shared classifier's filing,
+    /// and the has-content flag — are snapshot fields since
+    /// KH-2; see rebuildSnapshot. The filing rule is unchanged:
+    /// the classifier files the addon's events under a league
+    /// exactly as it files the mirror fixtures, and cross-border
+    /// cup fixtures keep the first-checked-league convention.)
 
     /// The channel copy for a folded league, in the Đức
     /// round's wording pattern: the channel rail's title and
@@ -337,20 +403,26 @@ struct TVContentView: View {
         }
     }
 
-    /// The English block, merged from both published lists and
-    /// deduplicated by URL (in practice it lives in the main list).
-    private var enChannels: [Channel] {
-        var seen = Set<String>()
-        var out: [Channel] = []
-        for ch in store.channels + store.hotChannels where TVEnglish.isEnglish(ch) {
-            if seen.insert(ch.url).inserted { out.append(ch) }
-        }
-        return out
+    /// The 3-across tile width from the measured content width
+    /// (KH-6): min(592, (W − 2×8 rail insets − 2×28 spacing)/3).
+    /// Before the first measurement lands, the approved 592.
+    private var tileWidth: CGFloat {
+        guard contentWidth > 0 else { return 592 }
+        return min(592, max(300, (contentWidth - 72) / 3))
     }
 
     var body: some View {
         ZStack {
             background
+            // KH-6: measure the REAL content width (the padded
+            // region the rails live in) — the tile width derives
+            // from this, never from an assumed screen size.
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { contentWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, w in contentWidth = w }
+            }
+            .padding(.horizontal, 32)
             VStack(spacing: 20) {
                 header
                 tabBar
@@ -369,9 +441,14 @@ struct TVContentView: View {
             .padding(.top, 40)
             .padding(.bottom, 28)
         }
-        .task { await store.start() }
+        .environment(\.tvTileWidth, tileWidth)
+        .task {
+            DiagLog.logSessionStart()
+            await store.start()
+            dataChanged()
+        }
         .task { await nuvio.load() }
-        .task(id: muPinEntry?.id) {
+        .task(id: snap.muPinEntry?.id) {
             // Pre-resolve the pinned Manchester United fixture
             // (2026-11-19): when a pin exists, its sources are
             // verified into the store's resolve cache at open, so
@@ -380,8 +457,10 @@ struct TVContentView: View {
             // the pin's identity — a new pin supersedes the old
             // pre-resolve inside the store, and the pin vanishing
             // cancels it; nothing is pre-resolved when no MU
-            // fixture is pinned.
-            if let pin = muPinEntry {
+            // fixture is pinned. KH-2: the pin is read from the
+            // snapshot — this hook no longer forces an
+            // allEntries computation on every body pass.
+            if let pin = snap.muPinEntry {
                 store.preResolve(pin.channel)
             } else {
                 store.cancelPreResolve()
@@ -402,32 +481,21 @@ struct TVContentView: View {
                              enItems: request.enItems,
                              nuvio: nuvio)
         }
-        .onChange(of: focusedKey) { _, key in
-            guard let key else { return }
-            if let item = heroLookup[key] { heroItem = item }
+        .fullScreenCover(isPresented: $logOpen) {
+            TVLogView()
         }
-        .onChange(of: store.selectedLeague) { _, _ in syncHero() }
-        .onChange(of: store.channels) { _, _ in syncHero() }
-        .onChange(of: store.hotChannels) { _, _ in syncHero() }
-        .onChange(of: nuvio.liveEvents) { _, _ in syncHero() }
-        .onChange(of: nuvio.upcomingEvents) { _, _ in syncHero() }
-        .onChange(of: nuvio.channels) { _, _ in syncHero() }
-        .onChange(of: nuvio.leagueChannels) { _, _ in syncHero() }
-    }
-
-    /// Focus key → hero content, for every focusable card on screen.
-    private var heroLookup: [String: HeroItem] {
-        var map: [String: HeroItem] = [:]
-        for entry in featuredEntries { map["feat:" + entry.id] = .fixture(entry) }
-        for entry in entries { map["rail:" + entry.id] = .fixture(entry) }
-        for ch in enChannels { map["en:" + ch.url] = .english(ch) }
-        for item in nuvio.liveEvents + nuvio.upcomingEvents + nuvio.channels {
-            map["nv:" + item.id] = .nuvio(item)
-        }
-        for items in nuvio.leagueChannels.values {
-            for item in items { map["nv:" + item.id] = .nuvio(item) }
-        }
-        return map
+        // KH-2: every DATA input rebuilds the snapshot (and
+        // re-validates the hero); focus changes never reach
+        // this body as work — the rails own their focus state
+        // and report hero keys through heroFocus(_:).
+        .onChange(of: store.selectedLeague) { _, _ in dataChanged() }
+        .onChange(of: store.channels) { _, _ in dataChanged() }
+        .onChange(of: store.hotChannels) { _, _ in dataChanged() }
+        .onChange(of: store.liveRevision) { _, _ in dataChanged() }
+        .onChange(of: nuvio.liveEvents) { _, _ in dataChanged() }
+        .onChange(of: nuvio.upcomingEvents) { _, _ in dataChanged() }
+        .onChange(of: nuvio.channels) { _, _ in dataChanged() }
+        .onChange(of: nuvio.leagueChannels) { _, _ in dataChanged() }
     }
 
     private func syncHero() {
@@ -475,10 +543,15 @@ struct TVContentView: View {
     // MARK: - Chrome
 
     private var background: some View {
+        // KH-7 (ĐG-4): navy, derived from the scoreboard's
+        // boardBG — the screen background and the tiles are one
+        // colour family now (was a teal-green gradient from the
+        // app's first design, which read as a second, different
+        // blue next to the navy boards in the owner's photos).
         LinearGradient(
-            colors: [Color(red: 0.02, green: 0.22, blue: 0.19),
-                     Color(red: 0.01, green: 0.11, blue: 0.11),
-                     Color(red: 0.00, green: 0.05, blue: 0.06)],
+            colors: [Color(red: 0.055, green: 0.09, blue: 0.17),
+                     TVPalette.boardBG,
+                     Color(red: 0.02, green: 0.035, blue: 0.07)],
             startPoint: .topLeading, endPoint: .bottomTrailing)
             .ignoresSafeArea()
     }
@@ -612,6 +685,26 @@ struct TVContentView: View {
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:check")
                 .disabled(store.isLoading || store.isValidating)
+                // KH-1: the diagnostic log's door — the app had
+                // NO way to get its log out before 1.4.3 (ĐG-3);
+                // the log screen shows the big LAN URL + QR.
+                Button {
+                    logOpen = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                        Text("Log")
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .font(.system(size: 20, weight: .medium))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(TVPillFace(focused: focusedKey == "hdr:log",
+                                           selected: false))
+                }
+                .tvCardButton()
+                .focused($focusedKey, equals: "hdr:log")
             }
         }
     }
@@ -866,7 +959,7 @@ struct TVContentView: View {
     private var footerRow: some View {
         HStack {
             Spacer()
-            Text("Đá Banh TV v1.4.2")
+            Text("Đá Banh TV v1.4.3")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
         }
@@ -924,53 +1017,27 @@ struct TVContentView: View {
         }
     }
 
+    // KH-2: the rails below are thin call sites over the leaf
+    // rail structs in TVMatchViews.swift, which own their own
+    // focus state. The play actions and the copy are unchanged;
+    // hero following goes through heroFocus(_:).
+
     private func nuvioEventRail(_ title: String, _ items: [NuvioItem]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(items) { item in
-                        Button {
-                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                        } label: {
-                            NuvioEventCard(item: item, focused: focusedKey == "nv:" + item.id)
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "nv:" + item.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+        TVNuvioEventRail(title: title, items: items,
+                         onSelect: { item in
+                             playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                         },
+                         onFocusKey: heroFocus)
     }
 
     private func nuvioChannelRail(_ items: [NuvioItem]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("📺  NUVIO · KÊNH 24/7")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            Text("Kênh tiếng Anh từ addon Nuvio — phát liên tục.")
-                .font(.system(size: 22))
-                .foregroundStyle(.white.opacity(0.6))
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(items) { item in
-                        Button {
-                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                        } label: {
-                            NuvioChannelCard(item: item, focused: focusedKey == "nv:" + item.id)
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "nv:" + item.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+        TVNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
+                           subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
+                           items: items,
+                           onSelect: { item in
+                               playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                           },
+                           onFocusKey: heroFocus)
     }
 
     /// A folded league tab's addon channel rail (owner,
@@ -979,60 +1046,24 @@ struct TVContentView: View {
     /// with the league's own copy and the card's own play line.
     private func leagueChannelRail(_ items: [NuvioItem], league: League) -> some View {
         let copy = leagueChannelCopy(league)
-        return VStack(alignment: .leading, spacing: 4) {
-            Text(copy.railTitle)
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            Text(copy.railSubtitle)
-                .font(.system(size: 22))
-                .foregroundStyle(.white.opacity(0.6))
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(items) { item in
-                        Button {
-                            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                        } label: {
-                            NuvioChannelCard(item: item, focused: focusedKey == "nv:" + item.id,
-                                             detailPrefix: copy.cardPrefix)
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "nv:" + item.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+        return TVNuvioChannelRail(title: copy.railTitle,
+                                  subtitle: copy.railSubtitle,
+                                  items: items,
+                                  detailPrefix: copy.cardPrefix,
+                                  onSelect: { item in
+                                      playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                  },
+                                  onFocusKey: heroFocus)
     }
 
     /// The old mirror EN block, unchanged but for its place:
     /// below the addon sections, as the fallback pool.
     private var oldENBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
-                .font(.system(size: 22))
-                .foregroundStyle(.white.opacity(0.6))
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(enChannels) { ch in
-                        Button {
+        TVENChannelRail(channels: enChannels,
+                        onSelect: { ch in
                             playRequest = PlayRequest(resolution: store.resolution(for: ch))
-                        } label: {
-                            TVENChannelCard(
-                                channel: ch,
-                                focused: focusedKey == "en:" + ch.url)
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "en:" + ch.url)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+                        },
+                        onFocusKey: heroFocus)
     }
 
     // MARK: - Hero
@@ -1095,15 +1126,7 @@ struct TVContentView: View {
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
             .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 26)
-                    .fill(LinearGradient(
-                        colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 26)
-                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
-                                          lineWidth: heroFocused ? 4 : 1.5)))
+            .background(tvHeroBackground(focused: heroFocused))
         }
         .tvCardButton()
         .focused($focusedKey, equals: "heroNV:" + item.id)
@@ -1201,15 +1224,7 @@ struct TVContentView: View {
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
             .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 26)
-                    .fill(LinearGradient(
-                        colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 26)
-                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
-                                          lineWidth: heroFocused ? 4 : 1.5)))
+            .background(tvHeroBackground(focused: heroFocused))
         }
         .tvCardButton()
         .focused($focusedKey, equals: "hero:" + entry.id)
@@ -1264,15 +1279,7 @@ struct TVContentView: View {
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
             .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 26)
-                    .fill(LinearGradient(
-                        colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 26)
-                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
-                                          lineWidth: heroFocused ? 4 : 1.5)))
+            .background(tvHeroBackground(focused: heroFocused))
         }
         .tvCardButton()
         .focused($focusedKey, equals: "heroEN:" + ch.url)
@@ -1347,59 +1354,20 @@ struct TVContentView: View {
     }
 
     // MARK: - Rails and cards
+    //
+    // KH-2: thin call sites over TVFixtureRail (TVMatchViews),
+    // which owns its own focus state; the titles, the card
+    // choice (live → board, else featured/match card) and the
+    // tap action are exactly as before.
 
     private func featuredRail(_ items: [TVFixtureEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("⭐  TRẬN NỔI BẬT")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(items) { entry in
-                        Button {
-                            play(entry)
-                        } label: {
-                            if entry.isLive {
-                                TVLiveBoardView(entry: entry, focused: focusedKey == "feat:" + entry.id)
-                            } else {
-                                TVFeaturedCard(entry: entry, focused: focusedKey == "feat:" + entry.id)
-                            }
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "feat:" + entry.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+        TVFixtureRail(title: "⭐  TRẬN NỔI BẬT", entries: items, style: .featured,
+                      onSelect: { play($0) }, onFocusKey: heroFocus)
     }
 
     private func railSection(_ title: String, _ items: [TVFixtureEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
-                    ForEach(items) { entry in
-                        Button {
-                            play(entry)
-                        } label: {
-                            if entry.isLive {
-                                TVLiveBoardView(entry: entry, focused: focusedKey == "rail:" + entry.id)
-                            } else {
-                                TVMatchCard(entry: entry, focused: focusedKey == "rail:" + entry.id)
-                            }
-                        }
-                        .tvCardButton()
-                        .focused($focusedKey, equals: "rail:" + entry.id)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 16)
-            }
-        }
+        TVFixtureRail(title: title, entries: items, style: .standard,
+                      onSelect: { play($0) }, onFocusKey: heroFocus)
     }
 
     // MARK: - Playing

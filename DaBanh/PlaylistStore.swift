@@ -73,7 +73,7 @@ final class PlaylistStore: ObservableObject {
     /// so crest-reading views re-render with the new badges.
     @Published private(set) var crestsRevision = 0
     /// Live match states (1.4.1, plan §1): ESPN > FotMob >
-    /// LiveScore > computed clock. Owned here; views read states
+    /// Flashscore > LiveScore > computed clock. Owned here; views read states
     /// through matchState(for:) / competition(for:), never the
     /// store directly. liveRevision bumps when states land so
     /// state-reading views re-render on the 60 s poll.
@@ -153,7 +153,7 @@ final class PlaylistStore: ObservableObject {
         loadCache()
         scheduleValidation()
         // Live-state polling rides its own cadence (60 s live /
-        // 5 min idle, plan §1.7) beside the 15-min playlist loop.
+        // 15 min idle, plan §1.7) beside the 15-min playlist loop.
         liveStore.onChange = { [weak self] in self?.liveRevision += 1 }
         liveStore.start(fixturesProvider: { [weak self] in
             guard let self else { return [] }
@@ -193,12 +193,16 @@ final class PlaylistStore: ObservableObject {
                 noteMirrorEN(parsed)
                 setData(parsed)
                 setHot(parsed)
+                DiagLog.write("playlist", "cache source=mirror channels=\(channels.count) hot=\(hotChannels.count)")
                 return
             }
         }
         if let text = readCache(cacheFileURL) {
             let parsed = M3UParser.parse(text)
-            if !parsed.isEmpty { setData(parsed) }
+            if !parsed.isEmpty {
+                setData(parsed)
+                DiagLog.write("playlist", "cache source=origin channels=\(channels.count) hot=\(hotChannels.count)")
+            }
         }
     }
 
@@ -234,10 +238,12 @@ final class PlaylistStore: ObservableObject {
                 setData(mergingEN(oparsed))
                 setHot(parsed)
                 statusMessage = "Gương đang chậm — đã dùng nguồn gốc mới hơn."
+                DiagLog.write("playlist", "refresh source=origin-stale-mirror channels=\(channels.count) hot=\(hotChannels.count)")
             } else {
                 try? data.write(to: mirrorCacheFileURL, options: .atomic)
                 setData(parsed)
                 setHot(parsed)
+                DiagLog.write("playlist", "refresh source=mirror channels=\(channels.count) hot=\(hotChannels.count)")
             }
         } catch {
             // GitHub unreachable: fall back to the origin site before
@@ -248,12 +254,14 @@ final class PlaylistStore: ObservableObject {
                 try? data.write(to: cacheFileURL, options: .atomic)
                 setData(mergingEN(parsed))
                 statusMessage = "Đang dùng nguồn dự phòng."
+                DiagLog.write("playlist", "refresh source=origin-fallback channels=\(channels.count) hot=\(hotChannels.count)")
             } catch {
                 if !loadedOnce {
                     statusMessage = "Không tải được danh sách kênh. Kiểm tra mạng rồi thử lại."
                 } else {
                     statusMessage = "Chưa làm mới được — đang dùng danh sách cũ."
                 }
+                DiagLog.write("playlist", "refresh FAILED loadedOnce=\(loadedOnce) channels=\(channels.count)")
             }
         }
         // A playlist refresh also triggers a state fetch (§1.7).
@@ -478,7 +486,7 @@ final class PlaylistStore: ObservableObject {
         let ladder = sources(for: ch)
         let key = fixtureKey(for: ch)
         if let entry = freshCacheEntry(forKey: key) {
-            print("[Resolve] cache hit (\(entry.negative ? "negative" : "verified")) — \(key)")
+            DiagLog.write("resolve", "cache hit (\(entry.negative ? "negative" : "verified")) — \(key)")
             return MatchResolution.completed(entry.sources)
         }
         if var flight = resolutionInFlight[key] {
@@ -513,7 +521,7 @@ final class PlaylistStore: ObservableObject {
             resolution: res, task: nil, startedByPreResolve: true, handedToPlayer: false)
         let task = Task { await self.runResolve(key: key, ladder: ladder, into: res) }
         resolutionInFlight[key]?.task = task
-        print("[Resolve] pre-resolving pinned fixture — \(key)")
+        DiagLog.write("resolve", "pre-resolving pinned fixture — \(key)")
     }
 
     /// Cancel the outstanding pre-resolve, if any — unless a
@@ -601,7 +609,7 @@ final class PlaylistStore: ObservableObject {
                     if !verified.isEmpty && (quorum || softPassed || settled) {
                         res.publish(verified)
                         presented = true
-                        print("[Resolve] \(key): first batch — \(verified.count) verified "
+                        DiagLog.write("resolve", "\(key): first batch — \(verified.count) verified "
                             + "(\(quorum ? "quorum" : settled ? "all settled" : "soft deadline"))")
                     }
                 }
@@ -628,7 +636,7 @@ final class PlaylistStore: ObservableObject {
                     resolutionTTLs[key] = max(ttl / 2, Self.resolveBaseTTL)
                 }
             }
-            print("[Resolve] \(key): finished — \(verifiedCount)/\(ladder.count) verified, "
+            DiagLog.write("resolve", "\(key): finished — \(verifiedCount)/\(ladder.count) verified, "
                 + "ladder \(final.count)")
         } else {
             res.finish()

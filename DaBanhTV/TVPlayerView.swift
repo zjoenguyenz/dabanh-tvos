@@ -91,6 +91,7 @@ struct TVPlayerView: View {
 
     private func openSwitch() {
         guard switchContext != nil else { return }
+        DiagLog.write("player", "switch overlay opened")
         switchOpen = true
         switchFocus = playingRowID
     }
@@ -234,6 +235,7 @@ struct TVPlayerView: View {
     /// the playing row builds a fresh ladder for it — an
     /// explicit reload, the Joe TV rule).
     private func pickVN(_ ch: Channel, in ctx: TVSwitchContext) {
+        DiagLog.write("player", "switch → VN host=\(URL(string: ch.url)?.host ?? "?")")
         activeResolution = ctx.makeVNResolution(ch)
         activeENItemID = nil
         playingURL = nil
@@ -243,6 +245,7 @@ struct TVPlayerView: View {
     }
 
     private func pickEN(_ item: NuvioItem, in ctx: TVSwitchContext) {
+        DiagLog.write("player", "switch → EN item=\(item.id)")
         activeResolution = ctx.makeENResolution(item)
         activeENItemID = item.id
         playingURL = nil
@@ -401,7 +404,13 @@ private struct PlayerSurface: View {
     }
 
     private func advance() {
-        if let currentURL { tried.insert(currentURL) }
+        if let currentURL {
+            tried.insert(currentURL)
+            // KH-1: player failures are a required log event —
+            // host only, never the full URL (DiagLog scrubs
+            // regardless; callers still log hosts, not links).
+            DiagLog.write("player", "source failed, advancing — host=\(URL(string: currentURL)?.host ?? "?") tried=\(tried.count)")
+        }
         currentURL = nil
         switching = true
         pump()
@@ -689,56 +698,34 @@ private struct PlayerController: UIViewControllerRepresentable {
         controller.player = player
         controller.view.isUserInteractionEnabled = !interactionLocked
         context.coordinator.observe(item)
-        if showsSwitchButton {
-            installSwitchButton(in: controller)
-        }
+        installSwitchMenuItem(in: controller)
         player.play()
         return controller
     }
 
-    /// The "Đổi nguồn" button lives in the player's own
-    /// content overlay — the kit's surface for interactive
-    /// content above the video and below the transport bar —
-    /// so the player's focus machinery owns reaching it. The
-    /// plate lives inside the button's configuration (the Joe
-    /// TV FIX6 doctrine): the system renders ONE focus plate,
-    /// its own, from the configuration, and the focused title
-    /// flips dark through the configuration update handler.
-    /// Anchored bottom-right, above the transport bar's zone.
-    private func installSwitchButton(in controller: AVPlayerViewController) {
-        guard let overlay = controller.contentOverlayView else { return }
-        let button = UIButton(type: .system)
-        var config = UIButton.Configuration.filled()
-        config.title = "🔀 Đổi nguồn"
-        config.baseForegroundColor = .white
-        config.background.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        config.background.cornerRadius = 14
-        config.contentInsets = NSDirectionalEdgeInsets(
-            top: 10, leading: 22, bottom: 10, trailing: 22)
-        config.titleTextAttributesTransformer =
-            UIConfigurationTextAttributesTransformer { incoming in
-                var outgoing = incoming
-                outgoing.font = .systemFont(ofSize: 25, weight: .semibold)
-                return outgoing
-            }
-        button.configuration = config
-        button.configurationUpdateHandler = { button in
-            guard var c = button.configuration else { return }
-            c.baseForegroundColor =
-                button.state.contains(.focused) ? .black : .white
-            button.configuration = c
+    /// KH-8 (ĐG-2): "Đổi nguồn" is a transport-bar custom menu
+    /// item — `transportBarCustomMenuItems`, the surface Apple
+    /// provides for exactly this (WWDC21 10191): the player
+    /// itself owns focus in its transport bar, so the item is
+    /// reachable from the seek bar by the remote, which is the
+    /// whole point. The previous construction put a UIButton
+    /// in `contentOverlayView`, which Apple's documentation
+    /// defines as the surface for NON-interactive content —
+    /// the player never routes focus there, so the button was
+    /// unreachable and focus stayed trapped on the seek bar
+    /// (the owner's 1.4.2 report). Direct launches without a
+    /// switch context install nothing, exactly as before.
+    private func installSwitchMenuItem(in controller: AVPlayerViewController) {
+        guard showsSwitchButton else {
+            controller.transportBarCustomMenuItems = []
+            return
         }
         let action = onSwitchButton
-        button.addAction(UIAction { _ in action() },
-                         for: .primaryActionTriggered)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        overlay.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.trailingAnchor.constraint(
-                equalTo: overlay.trailingAnchor, constant: -60),
-            button.bottomAnchor.constraint(
-                equalTo: overlay.bottomAnchor, constant: -150),
-        ])
+        let item = UIAction(
+            title: "Đổi nguồn",
+            image: UIImage(systemName: "arrow.triangle.2.circlepath")
+        ) { _ in action() }
+        controller.transportBarCustomMenuItems = [item]
     }
 
     /// The asset carries exactly the headers the entry itself
@@ -757,6 +744,7 @@ private struct PlayerController: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
         controller.view.isUserInteractionEnabled = !interactionLocked
+        installSwitchMenuItem(in: controller)
     }
 
     static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {

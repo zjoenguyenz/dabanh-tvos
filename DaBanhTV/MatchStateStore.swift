@@ -14,7 +14,7 @@ import Foundation
 /// 4 detail calls per poll cycle, live fixtures first.
 ///
 /// Poll cadence (plan §1.7): 60 s while anything is in its live
-/// window or matched-live, else 5 min. Last-good states are kept
+/// window or matched-live, else 15 min. Last-good states are kept
 /// 30 min, then overrides drop (never worse than the computed
 /// clock). All three sources are public-but-unlicensed site APIs;
 /// the client fetches directly, one request per endpoint per
@@ -52,8 +52,6 @@ struct MatchState: Equatable, Sendable {
     let minuteText: String?
     let scoreHome: Int?
     let scoreAway: Int?
-    let htHome: Int?
-    let htAway: Int?
     let events: [MatchEvent]
     let source: MatchSource
     let fetchedAt: Date
@@ -92,7 +90,7 @@ struct MatchState: Equatable, Sendable {
         MatchState(pairKey: pairKey, dateKey: dateKey, competition: competition,
                    status: status, minuteText: minuteText,
                    scoreHome: scoreHome, scoreAway: scoreAway,
-                   htHome: htHome, htAway: htAway, events: newEvents,
+                   events: newEvents,
                    source: source, fetchedAt: fetchedAt, kickoff: kickoff,
                    fotmobID: fotmobID)
     }
@@ -155,7 +153,16 @@ enum MatchPairKey {
         while let first = toks.first, markers.contains(first) { toks.removeFirst() }
         while let last = toks.last, markers.contains(last) { toks.removeLast() }
         let joined = toks.joined(separator: " ")
-        return nameAliases[joined] ?? joined
+        if let alias = nameAliases[joined] { return alias }
+        // Brazilian state suffix (FixtureGrouping's measured
+        // strip, KH-5 — shared with iOS 1.24): "sao paulo sp"
+        // must canonicalise to the same key as ESPN's
+        // "sao paulo" or the decorated listing can never bind
+        // this fixture's state — it then renders the bounded
+        // computed clock beside the matched tile's true minute,
+        // and one match shows two times.
+        let stripped = FixtureGrouping.droppingStateSuffix(joined)
+        return nameAliases[stripped] ?? stripped
     }
 
     static func key(home: String, away: String) -> String? {
@@ -223,6 +230,27 @@ final class MatchStateStore: ObservableObject {
 
     // MARK: - Lookup (pair-key + date agreement, fail closed)
 
+    /// Pair-key cache (KH-2 item 3): canonicalising a channel's
+    /// title (Crests.norm + the alias tables) used to run again
+    /// on EVERY state(for:) / competition(for:) call — 4–6 times
+    /// per fixture per body pass on the focus path. The key is a
+    /// pure function of the channel's TITLE (MatchPairKey.key(of:)
+    /// reads nothing else), so the title is the cache key; ""
+    /// stores a known-nil (a real pair key is never empty —
+    /// MatchPairKey.key guards both sides non-empty). The mapping
+    /// can never go stale inside a process: the alias tables are
+    /// static and Crests.norm is pure.
+    private var pairKeyCache: [String: String] = [:]
+
+    private func pairKey(for channel: Channel) -> String? {
+        if let hit = pairKeyCache[channel.title] {
+            return hit.isEmpty ? nil : hit
+        }
+        let key = MatchPairKey.key(of: channel)
+        pairKeyCache[channel.title] = key ?? ""
+        return key
+    }
+
     /// The matched state for a fixture channel, or nil. Tries the
     /// fixture's own ICT stamp date first, then the ±1-day ESPN
     /// seam — the seam binds only when the kickoff instants are
@@ -230,7 +258,7 @@ final class MatchStateStore: ObservableObject {
     /// last-good window no longer override anything.
     func state(for channel: Channel, now: Date = Date()) -> MatchState? {
         guard let kickoff = channel.kickoff,
-              let pair = MatchPairKey.key(of: channel) else { return nil }
+              let pair = pairKey(for: channel) else { return nil }
         let ownKey = FixtureGrouping.stampDateKey(of: kickoff)
         if let s = states[pair + "|" + ownKey], isFresh(s, now: now) {
             return s
@@ -242,6 +270,28 @@ final class MatchStateStore: ObservableObject {
                   abs(sk.timeIntervalSince(kickoff)) <= 3 * 3600 else { continue }
             return s
         }
+        // KH-9 (ĐG-9): a LiveScore state carries no kickoff (the
+        // layer is score + minute only), so the seam above —
+        // which requires the state's kickoff — could NEVER bind
+        // it to a fixture stamped on the neighbouring ICT day:
+        // a dead path for exactly the late Americas fixtures
+        // that layer exists to cover. The feed DOES carry a
+        // start stamp (Esd, yyyyMMddHHmmss — payload captured
+        // 2026-11-19, 143-evidence/ls_live.json), but its
+        // timezone is not the UTC it appears to be (the four
+        // live events read exactly UTC+3 against their ESPN
+        // kickoffs, an offset no documentation states and that
+        // may follow the requester's locale), so no kickoff is
+        // derived from it — a wrong instant would do more harm
+        // than none. Fallback, fail closed: when exactly ONE
+        // fresh LiveScore state exists for this pair across all
+        // date keys it binds; two or more (today's beside a
+        // last-good from the previous day) are ambiguous and
+        // bind nothing.
+        let lsCandidates = states.values.filter {
+            $0.pairKey == pair && $0.source == .livescore && isFresh($0, now: now)
+        }
+        if lsCandidates.count == 1 { return lsCandidates[0] }
         return nil
     }
 
@@ -281,9 +331,14 @@ final class MatchStateStore: ObservableObject {
         fetching = true
         defer { fetching = false }
         let now = Date()
-        // ESPN days intersecting the ICT window being served:
-        // yesterday/today/tomorrow ICT at the seam (plan §1.1).
-        let days = (0...1).map { Self.espnDayString(now.addingTimeInterval(TimeInterval($0 * 86400))) }
+        // ESPN days to fetch (KH-4, ĐG-8): ESPN files its events
+        // under the US-EASTERN day, so the window is read in
+        // America/New_York — {yesterday, today, tomorrow} Eastern.
+        // The old window read two ICT days: during US-evening
+        // hours ICT is already a day ahead, the Eastern day the
+        // evening's Americas fixtures are filed under was never
+        // requested, and ESPN silently never answered them.
+        let days = Self.espnDays(now: now)
         let todayICT = Self.ictDateKey(now)
         async let espnStates = Self.fetchESPN(slugs: CompetitionID.espnSlugs, days: days)
         async let fotmobStates = Self.fetchFotMobMerged(now: now)
@@ -322,6 +377,10 @@ final class MatchStateStore: ObservableObject {
                 merged[key] = state.withEvents(events)
             }
         }
+        // Staleness guard (KH-3, ĐG-7): a frozen winning layer
+        // may yield to a fresher lower layer under the strict
+        // fail-closed conditions in applyStalenessGuard.
+        applyStalenessGuard(&merged, layers: layers)
         // Keep last-good for keys no layer answered this cycle (a
         // source error skips that cycle only, plan §1.7).
         var next = merged
@@ -332,20 +391,149 @@ final class MatchStateStore: ObservableObject {
             states = next
             onChange?()
         }
+        // KH-1: the cycle's own account of itself — per-layer
+        // counts, the merged total, the ESPN day window used —
+        // plus the live-window fixtures no layer bound (the
+        // bind-miss evidence ĐG-3 made impossible to collect).
+        DiagLog.write("poll", "espn=\(espnStates.count) fotmob=\(fotmobStates.count) "
+            + "flash=\(flashscoreStates.count) livescore=\(livescoreStates.count) "
+            + "merged=\(next.count) espnDays=\(days.joined(separator: ","))")
+        if let fixtures = fixturesProvider?() {
+            var misses: [String] = []
+            for ch in fixtures
+            where LeagueClassifier.bucket(of: ch, now: now) == 0 {
+                if state(for: ch, now: now) == nil {
+                    misses.append(MatchPairKey.key(of: ch) ?? ch.title)
+                }
+            }
+            if !misses.isEmpty {
+                DiagLog.write("poll", "bind-miss \(misses.count): "
+                    + misses.prefix(5).joined(separator: " | "))
+            }
+        }
+    }
+
+    // MARK: - Staleness guard (KH-3, ĐG-7)
+
+    /// The winning layer's rank (lower = stronger) — the same
+    /// order cycle() merges in.
+    private static func rank(_ source: MatchSource) -> Int {
+        switch source {
+        case .espn: return 0
+        case .fotmob: return 1
+        case .flashscore: return 2
+        case .livescore: return 3
+        }
+    }
+
+    /// A comparable minute for a live state: "61'" → 61,
+    /// "45'+3'" → 48. nil when the state is not live or carries
+    /// no parseable minute (Flashscore states never carry one)
+    /// — such states can neither be guarded nor challenge.
+    nonisolated static func minuteValue(of state: MatchState) -> Double? {
+        guard state.status == .live, let text = state.minuteText else { return nil }
+        let parts = text.replacingOccurrences(of: "'", with: "")
+            .split(separator: "+")
+        guard !parts.isEmpty else { return nil }
+        var total = 0
+        for part in parts {
+            guard let v = Int(part.trimmingCharacters(in: .whitespaces))
+            else { return nil }
+            total += v
+        }
+        return Double(total)
+    }
+
+    /// Per-key winner history for the guard: the winning source,
+    /// its minute, and how many consecutive cycles that minute
+    /// has now stood still.
+    private var winnerTrack: [String: (source: MatchSource, minute: Double, stuck: Int)] = [:]
+
+    /// The guard (plan KH-3): the winning (highest-layer) state
+    /// yields for THIS cycle only when ALL of these hold —
+    ///   · the winner is .live and its minute has not advanced
+    ///     for 2 consecutive cycles (a server-frozen payload
+    ///     re-fetched every 60 s otherwise looks forever fresh:
+    ///     fetchedAt is our own fetch stamp, ĐG-7);
+    ///   · a lower layer holds a state for the same key that is
+    ///     also .live and whose minute is at least 3 ahead;
+    ///   · the challenger's score is not behind the winner's on
+    ///     either side (goals never go backwards).
+    /// Anything else — HT/FT states, a minute-less layer, a
+    /// genuinely standing minute both layers agree on — leaves
+    /// the layer order exactly as it was. The override is
+    /// recomputed from the live layers every cycle; nothing is
+    /// latched.
+    /// Internal (not private) so the desk harness can replay
+    /// frozen-layer sequences against the real function (KH-3).
+    func applyStalenessGuard(_ merged: inout [String: MatchState],
+                                     layers: [[String: MatchState]]) {
+        var overrides: [(String, MatchState, MatchState)] = []
+        for (key, winner) in merged {
+            guard let wMinute = Self.minuteValue(of: winner) else {
+                winnerTrack.removeValue(forKey: key)
+                continue
+            }
+            let stuck: Int
+            if let t = winnerTrack[key],
+               t.source == winner.source, t.minute == wMinute {
+                stuck = t.stuck + 1
+            } else {
+                stuck = 0
+            }
+            winnerTrack[key] = (winner.source, wMinute, stuck)
+            guard stuck >= 2 else { continue }
+            let wRank = Self.rank(winner.source)
+            var challenger: MatchState? = nil
+            for layer in layers {
+                guard let s = layer[key], Self.rank(s.source) > wRank,
+                      let cMinute = Self.minuteValue(of: s),
+                      cMinute >= wMinute + 3
+                else { continue }
+                challenger = s
+                break
+            }
+            guard let challenger,
+                  let cH = challenger.scoreHome, let cA = challenger.scoreAway,
+                  let wH = winner.scoreHome, let wA = winner.scoreAway,
+                  cH >= wH, cA >= wA
+            else { continue }
+            overrides.append((key, winner, challenger))
+        }
+        for (key, winner, challenger) in overrides {
+            merged[key] = challenger
+            DiagLog.write("guard", "override \(key): \(winner.source) "
+                + "\(winner.minuteText ?? "?") stood still → "
+                + "\(challenger.source) \(challenger.minuteText ?? "?")")
+        }
     }
 
     // MARK: - Date helpers
 
-    nonisolated private static func ictCalendar() -> Calendar {
+    /// America/New_York calendar — ESPN files its events under
+    /// the US-Eastern day (KH-4, ĐG-8).
+    nonisolated private static func easternCalendar() -> Calendar {
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
         return cal
     }
 
-    /// "YYYYMMDD" for ESPN's dates= parameter, the date read in ICT.
-    nonisolated private static func espnDayString(_ date: Date) -> String {
-        let c = ictCalendar().dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    /// The ESPN fetch window: "YYYYMMDD" for the Eastern
+    /// {yesterday, today, tomorrow} around `now`. The three days
+    /// are built with calendar day arithmetic in the Eastern
+    /// calendar itself (never ±86400 s), so a DST transition day
+    /// (23/25 h) can neither skip nor duplicate a day.
+    /// Internal (not private) so the desk harness can assert
+    /// the KH-4 window against the real function.
+    nonisolated static func espnDays(now: Date) -> [String] {
+        let cal = easternCalendar()
+        let start = cal.startOfDay(for: now)
+        return (-1...1).compactMap { offset in
+            cal.date(byAdding: .day, value: offset, to: start)
+        }.map { day in
+            let c = cal.dateComponents([.year, .month, .day], from: day)
+            return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+        }
     }
 
     /// The app's own local calendar (owner timezone ruling
@@ -526,7 +714,6 @@ final class MatchStateStore: ObservableObject {
                 minuteText: status == .live ? event.status?.displayClock : nil,
                 scoreHome: home.score.flatMap { Int($0) },
                 scoreAway: away.score.flatMap { Int($0) },
-                htHome: nil, htAway: nil,
                 events: events, source: .espn, fetchedAt: Date(),
                 kickoff: kickoff, fotmobID: nil))
         }
@@ -617,7 +804,7 @@ final class MatchStateStore: ObservableObject {
                     status: status,
                     minuteText: status == .live ? st.liveTime?.short : nil,
                     scoreHome: sh, scoreAway: sa,
-                    htHome: nil, htAway: nil, events: [],
+                    events: [],
                     source: .fotmob, fetchedAt: Date(),
                     kickoff: kickoff, fotmobID: m.id)
                 out[state.storageKey] = state
@@ -743,7 +930,7 @@ final class MatchStateStore: ObservableObject {
                 competition: leagueHeader.flatMap { CompetitionID(flashscoreLeague: $0) },
                 status: status, minuteText: nil,
                 scoreHome: sh, scoreAway: sa,
-                htHome: nil, htAway: nil, events: [],
+                events: [],
                 source: .flashscore, fetchedAt: Date(),
                 kickoff: kickoff, fotmobID: nil)
             out[state.storageKey] = state
@@ -797,7 +984,7 @@ final class MatchStateStore: ObservableObject {
                     pairKey: pair, dateKey: todayKey, competition: nil,
                     status: status, minuteText: minute,
                     scoreHome: e.Tr1, scoreAway: e.Tr2,
-                    htHome: nil, htAway: nil, events: [],
+                    events: [],
                     source: .livescore, fetchedAt: Date(), kickoff: nil, fotmobID: nil)
                 out[state.storageKey] = state
             }

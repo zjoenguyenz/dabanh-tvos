@@ -240,8 +240,10 @@ enum TVEnglish {
 enum TVPalette {
     static let cyan = Color(red: 0.0, green: 0.898, blue: 1.0)
     // Scoreboard tokens (spec §0 — the approved prototype's exact
-    // palette; the board is a new surface with its own colours,
-    // the app's teal identity above is untouched elsewhere).
+    // palette). Since 1.4.3 (KH-7) this navy family is the app's
+    // ONE colour family — the screen background and the card/hero
+    // faces derive from it too; the teal/cyan identity above
+    // remains as accents (focus ring, badges, live dot).
     static let boardBG = Color(red: 0.039, green: 0.067, blue: 0.125)      // #0A1120
     static let boardSky = Color(red: 0.220, green: 0.741, blue: 0.973)     // #38BDF8
     static let tileBG = Color(red: 0.067, green: 0.114, blue: 0.200)       // #111D33
@@ -321,18 +323,61 @@ struct TVStatusChip: View {
     }
 }
 
-/// Tile background shared by every rail card: the same glassy panel
-/// as the hero, with the thick cyan focus ring the owner approved —
-/// the focus state must read from the sofa, not just glow faintly.
+/// Tile background shared by every rail card, with the thick
+/// cyan focus ring the owner approved — the focus state must
+/// read from the sofa, not just glow faintly. KH-7 (ĐG-4): the
+/// fill is the scoreboard's navy family (tileBG → boardBG),
+/// not the old white glass — the whole app now reads as ONE
+/// colour family, the board's. Colour tokens only; the shape,
+/// the ring and the geometry are unchanged.
 func tvCardBackground(focused: Bool) -> some View {
     RoundedRectangle(cornerRadius: 22)
         .fill(LinearGradient(
-            colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
+            colors: [focused ? TVPalette.tileFocusedBG : TVPalette.tileBG,
+                     TVPalette.boardBG],
             startPoint: .topLeading, endPoint: .bottomTrailing))
         .overlay(
             RoundedRectangle(cornerRadius: 22)
-                .strokeBorder(focused ? TVPalette.cyan : Color.white.opacity(0.16),
+                .strokeBorder(focused ? TVPalette.cyan : TVPalette.tileBorder,
                               lineWidth: focused ? 4 : 1.5))
+}
+
+/// The hero panel's background — the same navy family and the
+/// same focus ring as tvCardBackground, at the hero's larger
+/// corner radius (KH-7).
+func tvHeroBackground(focused: Bool) -> some View {
+    RoundedRectangle(cornerRadius: 26)
+        .fill(LinearGradient(
+            colors: [focused ? TVPalette.tileFocusedBG : TVPalette.tileBG,
+                     TVPalette.boardBG],
+            startPoint: .topLeading, endPoint: .bottomTrailing))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26)
+                .strokeBorder(focused ? TVPalette.cyan : TVPalette.tileBorder,
+                              lineWidth: focused ? 4 : 1.5))
+}
+
+// MARK: - Rail tile width (KH-6, ĐG-5)
+
+/// The 3-across tile width, measured — never assumed. The
+/// tiles used to be a hard 592pt, a number that is exactly
+/// right only when the running screen offers exactly the
+/// width the arithmetic was done against (1920pt); on the
+/// owner's set the row overflowed and the third tile was cut
+/// (his 1.4.2 photos). The root now measures its real content
+/// width at runtime and publishes
+/// min(592, (W − 2×8 rail insets − 2×28 spacing) / 3) here;
+/// heights and ALL type sizes stay exactly as approved (the
+/// owner's not-shrunk ruling for his father's smaller TV).
+private struct TVTileWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 592
+}
+
+extension EnvironmentValues {
+    var tvTileWidth: CGFloat {
+        get { self[TVTileWidthKey.self] }
+        set { self[TVTileWidthKey.self] = newValue }
+    }
 }
 
 // MARK: - Card button (the .card cure, 2026-11-17)
@@ -527,6 +572,7 @@ struct TVChannelLogo: View {
 /// count. One tile per fixture, however many sources carry it.
 struct TVFeaturedCard: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTileWidth) private var tileWidth
     let entry: TVFixtureEntry
     let focused: Bool
 
@@ -614,7 +660,10 @@ struct TVFeaturedCard: View {
         // screen. Height unchanged; internals are flexible
         // (teamBlock is maxWidth .infinity), nothing inside
         // assumes 640.
-        .frame(width: 592, height: 330, alignment: .leading)
+        // KH-6: the width itself is no longer the constant —
+        // it is the measured tvTileWidth (capped at this 592),
+        // so the row fits the screen the app actually runs on.
+        .frame(width: tileWidth, height: 330, alignment: .leading)
         .background(tvCardBackground(focused: focused))
     }
 
@@ -654,6 +703,7 @@ struct TVFeaturedCard: View {
 /// the OS platter never fights it (spec §5.2-10).
 struct TVLiveBoardView: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTileWidth) private var tileWidth
     let entry: TVFixtureEntry
     let focused: Bool
 
@@ -690,7 +740,9 @@ struct TVLiveBoardView: View {
         // screen. Height unchanged; the focus ring is strokeBorder
         // (inside the frame), so a fully-visible frame means a
         // fully-visible ring.
-        .frame(width: 592, height: 342, alignment: .topLeading)
+        // KH-6: the width is the measured tvTileWidth (capped at
+        // this 592) — see TVTileWidthKey.
+        .frame(width: tileWidth, height: 342, alignment: .topLeading)
         .background(boardBackground)
     }
 
@@ -914,5 +966,211 @@ struct TVENChannelCard: View {
         .padding(22)
         .frame(width: 470, height: 252, alignment: .topLeading)
         .background(tvCardBackground(focused: focused))
+    }
+}
+
+// MARK: - Rails (KH-2, ĐG-1 — focus lives at the leaf)
+//
+// The focus-lag cure's view half: every rail is its OWN view
+// and owns its OWN @FocusState. In 1.4.2 the single @FocusState
+// sat on the root view, so every focus step re-ran the root's
+// whole body — which regrouped and re-enriched the entire pool
+// at ~21 call sites. Now a focus step invalidates only the rail
+// the remote is actually moving through; the root's body reads
+// a precomputed snapshot (see TVContentView) for all grouped /
+// enriched data — the only per-pass work left there is the
+// time-based bucket split, which is live by design (see the
+// HomeSnapshot note in TVContentView). Focus changes are
+// reported upward as KEYS only (the root maps key → hero
+// content through the snapshot's hero lookup), and each change
+// is signposted into DiagLog (KH-1/KH-2's measuring rule).
+
+/// One horizontal rail of fixture tiles — the featured rail
+/// (big face-off cards) or a standard bucket rail (match
+/// cards); live fixtures render as scoreboards in both.
+struct TVFixtureRail: View {
+    enum Style { case featured, standard }
+
+    let title: String
+    let entries: [TVFixtureEntry]
+    let style: Style
+    let onSelect: (TVFixtureEntry) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    private var keyPrefix: String { style == .featured ? "feat:" : "rail:" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(entries) { entry in
+                        Button {
+                            onSelect(entry)
+                        } label: {
+                            if entry.isLive {
+                                TVLiveBoardView(entry: entry,
+                                                focused: focus == keyPrefix + entry.id)
+                            } else if style == .featured {
+                                TVFeaturedCard(entry: entry,
+                                               focused: focus == keyPrefix + entry.id)
+                            } else {
+                                TVMatchCard(entry: entry,
+                                            focused: focus == keyPrefix + entry.id)
+                            }
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: keyPrefix + entry.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// One horizontal rail of Nuvio addon EVENT items (live or
+/// upcoming fixtures from the addon).
+struct TVNuvioEventRail: View {
+    let title: String
+    let items: [NuvioItem]
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            NuvioEventCard(item: item,
+                                           focused: focus == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// One horizontal rail of Nuvio 24/7 CHANNEL items — the EN
+/// tab's channel rail and the folded league tabs' channel
+/// rails (league copy + card prefix passed in).
+struct TVNuvioChannelRail: View {
+    let title: String
+    var subtitle: String? = nil
+    let items: [NuvioItem]
+    var detailPrefix: String? = nil
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 22))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            if let detailPrefix {
+                                NuvioChannelCard(item: item,
+                                                 focused: focus == "nv:" + item.id,
+                                                 detailPrefix: detailPrefix)
+                            } else {
+                                NuvioChannelCard(item: item,
+                                                 focused: focus == "nv:" + item.id)
+                            }
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// The old mirror EN block's rail: plain playable 24/7
+/// channels, no fixture grouping, no ladder.
+struct TVENChannelRail: View {
+    let channels: [Channel]
+    let onSelect: (Channel) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 28) {
+                    ForEach(channels) { ch in
+                        Button {
+                            onSelect(ch)
+                        } label: {
+                            TVENChannelCard(channel: ch,
+                                            focused: focus == "en:" + ch.url)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "en:" + ch.url)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
     }
 }
