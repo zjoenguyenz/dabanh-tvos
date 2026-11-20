@@ -8,8 +8,13 @@ import Foundation
 /// agreement, fail closed: a state binds to a fixture only when the
 /// pair matches AND the calendar dates agree (the ESPN US-Eastern
 /// day seam tolerates ±1 day only when kickoff instants are within
-/// 3 h). A higher layer's state replaces a lower one's wholesale —
-/// fields are never merged across sources. FotMob matchDetails may
+/// 3 h). Storage keeps one state per (pair, date) — the highest
+/// layer that produced it — but the LOOKUP completes the winner
+/// from the fixture's other date-compatible states, filling only
+/// fields the winner lacks (1.4.5 partial-state merge, the RC2 /
+/// FL-120 fix: a score-only Flashscore winner no longer starves
+/// the events a FotMob state for the same fixture carries).
+/// FotMob matchDetails may
 /// upgrade a FotMob day-feed state (same source family), capped at
 /// 4 detail calls per poll cycle, live fixtures first.
 ///
@@ -139,71 +144,34 @@ struct MatchState: Equatable, Sendable {
 
 /// Pair-key for two raw source team names — the CANONICAL key
 /// of the measured matcher study (BOARD-REDESIGN-PLAN Addendum 2,
-/// matcher v2, run over today's real mirror + Nuvio events; the
-/// alias/filler tables below are its measured tables, adopted
-/// verbatim — do not extend them without a measured case):
-/// Crests.norm (Foundation diacritic folding, so Køge/Koge
-/// canonicalise identically), filler tokens dropped (the fixture
-/// identity's set PLUS de/do/da/del, dsc, sl, s, futbol, football
-/// — each forced by a measured near-miss), numeric tokens
-/// dropped, women's markers stripped as leading AND trailing
-/// tokens, token aliases applied per token, whole-name aliases
-/// applied last (whole name only, never substring). The tables
-/// are Addendum 2's measured set exactly — no invented entries
-/// (the survey's VN national-team aliases are NOT in the
-/// measured table and are not carried; Addendum 2 is
-/// authoritative for belonging, and this one function serves
-/// every source, spec §2.5).
-/// The same canonical function keys ESPN/FotMob/LiveScore states,
-/// mirror fixtures and Nuvio events — one matcher everywhere
-/// (spec §2.5). Fixture GROUPING keeps FixtureGrouping's own
-/// key; only matching uses this canonical key.
+/// matcher v2, run over the real mirror + Nuvio events).
+///
+/// 1.4.5 (FIX-127 port) supersedes the implementation, not the
+/// design: the tables and the pipeline moved into TeamNameNorm,
+/// the ONE normalization module every layer shares, and the
+/// pipeline gained the steps the matcher-v2 shape could not
+/// express — age markers are extracted BEFORE alias resolution
+/// and re-attached as a canonical tag (the whole-name lookup on
+/// the unstripped "y u17" is what split Ý U17 from Italy U17,
+/// DB-04 variant 2 / FL-111), the leading "Câu lạc bộ (bóng
+/// đá)" club phrase drops, measured city qualifiers
+/// (jeddah/samara — with the stem guard) drop from the tail
+/// (DB-08 / FL-115: "Al-Ahli Jeddah" never met the "Al Ahli"
+/// state), letters the diacritic fold cannot decompose (ı, ø,
+/// æ…) fold by hand ("Sumqayıt" reduced to "sumqay t"), and the
+/// survey's VN national-team whole-name aliases are carried —
+/// measured, like every other entry. This type keeps its
+/// public API and delegates; its private tables are gone.
+/// The same canonical function keys ESPN/FotMob/Flashscore/
+/// LiveScore states, mirror fixtures and Nuvio events — one
+/// matcher everywhere (spec §2.5). Fixture GROUPING runs the
+/// same module's grouping key (FixtureGrouping delegates too).
 enum MatchPairKey {
-    private static let filler: Set<String> = [
-        "fc", "cf", "sc", "afc", "ca", "cd", "fk", "sk",
-        "club", "ac", "as", "sd", "us", "ec",
-        "de", "do", "da", "del", "dsc", "sl", "s", "futbol", "football",
-    ]
-    private static let markers: Set<String> = [
-        "women", "w", "nu", "feminin", "femmes", "femenino", "femenina",
-    ]
-    private static let tokenAliases: [String: String] = [
-        "munchen": "munich", "wien": "vienna", "koln": "cologne",
-        "mgladbach": "gladbach", "lyonnes": "lyon",
-    ]
-    private static let nameAliases: [String: String] = [
-        "atletico penarol": "penarol",
-        "montevideo city torque": "montevideo city",
-        "servette chenois": "servette",
-        "servette geneve": "servette",
-        "vitoria ba": "vitoria",
-        "koge": "hb koge",
-        // Measured 2026-11-19 (Flashscore/ESPN Brazil feeds write
-        // the club three ways; the mirror writes "Bragantino"):
-        "rb bragantino": "bragantino",
-        "red bull bragantino": "bragantino",
-        "bragantino sp": "bragantino",
-        "vitoria salvador ba": "vitoria",
-    ]
 
-    /// One team name canonicalised (matcher v2's canonical_team).
+    /// One team name canonicalised — the shared module's
+    /// canonical key (TeamNameNorm.canonicalKey).
     static func canonicalTeam(_ name: String) -> String {
-        var toks = Crests.norm(name).split(separator: " ").map(String.init)
-            .filter { !filler.contains($0) && !$0.allSatisfy({ $0.isNumber }) }
-            .map { tokenAliases[$0] ?? $0 }
-        while let first = toks.first, markers.contains(first) { toks.removeFirst() }
-        while let last = toks.last, markers.contains(last) { toks.removeLast() }
-        let joined = toks.joined(separator: " ")
-        if let alias = nameAliases[joined] { return alias }
-        // Brazilian state suffix (FixtureGrouping's measured
-        // strip, KH-5 — shared with iOS 1.24): "sao paulo sp"
-        // must canonicalise to the same key as ESPN's
-        // "sao paulo" or the decorated listing can never bind
-        // this fixture's state — it then renders the bounded
-        // computed clock beside the matched tile's true minute,
-        // and one match shows two times.
-        let stripped = FixtureGrouping.droppingStateSuffix(joined)
-        return nameAliases[stripped] ?? stripped
+        TeamNameNorm.canonicalKey(forTeam: name)
     }
 
     static func key(home: String, away: String) -> String? {
@@ -348,20 +316,25 @@ final class MatchStateStore: ObservableObject {
     /// fixture's own ICT stamp date first, then the ±1-day ESPN
     /// seam — the seam binds only when the kickoff instants are
     /// within 3 h (plan §1.4). States older than the 30-minute
-    /// last-good window no longer override anything.
+    /// last-good window no longer override anything. The winner
+    /// is then completed by the partial-state merge
+    /// (filledFromPool): its missing fields are filled from the
+    /// fixture's other date-compatible states, never overwritten.
     func state(for channel: Channel, now: Date = Date()) -> MatchState? {
         guard let kickoff = channel.kickoff,
               let pair = pairKey(for: channel) else { return nil }
         let ownKey = FixtureGrouping.stampDateKey(of: kickoff)
         if let s = states[pair + "|" + ownKey], isFresh(s, now: now) {
-            return s
+            return filledFromPool(s, fixtureKickoff: kickoff,
+                                  fixtureDateKey: ownKey, now: now)
         }
         for delta in [-86400.0, 86400.0] {
             let seamKey = FixtureGrouping.stampDateKey(of: kickoff.addingTimeInterval(delta))
             guard let s = states[pair + "|" + seamKey], isFresh(s, now: now),
                   let sk = s.kickoff,
                   abs(sk.timeIntervalSince(kickoff)) <= 3 * 3600 else { continue }
-            return s
+            return filledFromPool(s, fixtureKickoff: kickoff,
+                                  fixtureDateKey: ownKey, now: now)
         }
         // KH-9 (ĐG-9): a LiveScore state carries no kickoff (the
         // layer is score + minute only), so the seam above —
@@ -384,8 +357,101 @@ final class MatchStateStore: ObservableObject {
         let lsCandidates = states.values.filter {
             $0.pairKey == pair && $0.source == .livescore && isFresh($0, now: now)
         }
-        if lsCandidates.count == 1 { return lsCandidates[0] }
+        if lsCandidates.count == 1 {
+            return filledFromPool(lsCandidates[0], fixtureKickoff: kickoff,
+                                  fixtureDateKey: ownKey, now: now)
+        }
         return nil
+    }
+
+    /// Partial-state merge (1.4.5, the FIX-127 port of the RC2 /
+    /// FL-120 fix): precedence picks the winning STATE, but a
+    /// source's state is often partial — Flashscore carries a
+    /// score with no minute and no incidents, a FotMob state can
+    /// carry the minute while another layer carries the events —
+    /// and the pre-1.4.5 lookup returned the winner exactly as
+    /// stored, so the fixture rendered the parts no single source
+    /// had assembled (score shown, scorers/cards missing, even
+    /// though a bound state for the same fixture held them). The
+    /// winner now keeps every field it HAS; only its gaps are
+    /// filled, from the fixture's own donor pool — fresh states
+    /// for the same pair that are date-compatible with the
+    /// FIXTURE (its own stamp date, or a kickoff within 3 h
+    /// across the seam — the same agreement the winner itself
+    /// had to pass; never from outside that pool), strongest
+    /// layer first:
+    /// - status: a `.pre` winner yields to a pool donor already
+    ///   live / half-time / full-time (a reported later status
+    ///   is never downgraded — RC5 discipline);
+    /// - score: filled as a PAIR from the first donor carrying
+    ///   both sides AND agreeing with every side the winner
+    ///   already holds — home from one source and away from
+    ///   another is never mixed, and a donor that contradicts
+    ///   a set side is refused (fail closed);
+    /// - minute, events, competition: filled when absent.
+    /// A donor never overwrites a set field, so the merged
+    /// state is still recognisably the winner's truth,
+    /// completed. The stored states are not mutated — the fill
+    /// is recomputed at every lookup, exactly like iOS.
+    private func filledFromPool(_ winner: MatchState, fixtureKickoff: Date,
+                                fixtureDateKey: String, now: Date) -> MatchState {
+        let donors = states.values
+            .filter { s in
+                s.pairKey == winner.pairKey
+                    && s.storageKey != winner.storageKey
+                    && isFresh(s, now: now)
+                    && (s.dateKey == fixtureDateKey
+                        || (s.kickoff.map {
+                            abs($0.timeIntervalSince(fixtureKickoff)) <= 3 * 3600
+                        } ?? false))
+            }
+            .sorted { Self.rank($0.source) < Self.rank($1.source) }
+        guard !donors.isEmpty else { return winner }
+        var status = winner.status
+        var minuteText = winner.minuteText
+        var scoreHome = winner.scoreHome
+        var scoreAway = winner.scoreAway
+        var events = winner.events
+        var competition = winner.competition
+        if status == .pre,
+           let donor = donors.first(where: {
+               $0.status == .live || $0.status == .ht || $0.status == .ft
+           }) {
+            status = donor.status
+            if minuteText == nil { minuteText = donor.minuteText }
+        }
+        if scoreHome == nil || scoreAway == nil,
+           let donor = donors.first(where: {
+               $0.scoreHome != nil && $0.scoreAway != nil
+                   && (scoreHome == nil || $0.scoreHome == scoreHome)
+                   && (scoreAway == nil || $0.scoreAway == scoreAway)
+           }) {
+            scoreHome = donor.scoreHome
+            scoreAway = donor.scoreAway
+        }
+        if minuteText == nil {
+            minuteText = donors.first(where: { $0.minuteText != nil })?.minuteText
+        }
+        if events.isEmpty,
+           let donor = donors.first(where: { !$0.events.isEmpty }) {
+            events = donor.events
+        }
+        if competition == nil {
+            competition = donors.first(where: { $0.competition != nil })?.competition
+        }
+        if status == winner.status, minuteText == winner.minuteText,
+           scoreHome == winner.scoreHome, scoreAway == winner.scoreAway,
+           events == winner.events, competition == winner.competition {
+            return winner
+        }
+        return MatchState(
+            pairKey: winner.pairKey, dateKey: winner.dateKey,
+            competition: competition, status: status,
+            minuteText: minuteText, scoreHome: scoreHome, scoreAway: scoreAway,
+            events: events, source: winner.source, fetchedAt: winner.fetchedAt,
+            kickoff: winner.kickoff, fotmobID: winner.fotmobID,
+            homeName: winner.homeName, awayName: winner.awayName,
+            logoHome: winner.logoHome, logoAway: winner.logoAway)
     }
 
     private func isFresh(_ s: MatchState, now: Date) -> Bool {
@@ -886,6 +952,18 @@ final class MatchStateStore: ObservableObject {
             let kickoff = event.date.flatMap { isoDate($0) }
             let dateKey = kickoff.map { FixtureGrouping.stampDateKey(of: $0) } ?? ""
             guard !dateKey.isEmpty else { continue }
+            // The feed's own badges go into Crests' learned
+            // registry (DB-02, 1.4.5), so the card — which looks
+            // crests up by the playlist's spelling of the same
+            // team — finds them even when the static map never
+            // carried the team. They ALSO stay on the state
+            // (logoHome/logoAway) for the 1.4.4 display fallback.
+            if let s = home.team?.logo, let u = URL(string: s) {
+                Crests.registerLearnedLogo(forTeam: homeName, logoURL: u)
+            }
+            if let s = away.team?.logo, let u = URL(string: s) {
+                Crests.registerLearnedLogo(forTeam: awayName, logoURL: u)
+            }
             out.append(MatchState(
                 pairKey: pair, dateKey: dateKey, competition: competition,
                 status: status,
@@ -905,7 +983,14 @@ final class MatchStateStore: ObservableObject {
     private struct FotMobDay: Decodable {
         struct League: Decodable {
             struct Match: Decodable {
-                struct Side: Decodable { let name: String? }
+                struct Side: Decodable {
+                    let name: String?
+                    /// The feed's team id (1.4.5): FotMob serves
+                    /// every badge from its teamlogo resource under
+                    /// this id, so the day-feed parse now carries
+                    /// it for the learned-logo registry (DB-02).
+                    let id: Int?
+                }
                 struct Status: Decodable {
                     struct LiveTime: Decodable { let short: String?; let long: String? }
                     let scoreStr: String?
@@ -1002,6 +1087,21 @@ final class MatchStateStore: ObservableObject {
                 let kickoff = st.utcTime.flatMap { isoDate($0) }
                 let dateKey = kickoff.map { FixtureGrouping.stampDateKey(of: $0) }
                     ?? FixtureGrouping.stampDateKey(of: Date())
+                // FotMob's day feed carries no logo field — only
+                // the team id — but FotMob serves every badge from
+                // its own teamlogo resource under that id (DB-02;
+                // the resource was verified live against this
+                // feed's ids, Orlando City and FC Cincinnati among
+                // them, before this derivation was trusted). The
+                // logos register into Crests exactly like ESPN's.
+                let homeLogo = m.home?.id.map {
+                    URL(string: "https://images.fotmob.com/image_resources/logo/teamlogo/\($0).png")
+                } ?? nil
+                let awayLogo = m.away?.id.map {
+                    URL(string: "https://images.fotmob.com/image_resources/logo/teamlogo/\($0).png")
+                } ?? nil
+                if let homeLogo { Crests.registerLearnedLogo(forTeam: hn, logoURL: homeLogo) }
+                if let awayLogo { Crests.registerLearnedLogo(forTeam: an, logoURL: awayLogo) }
                 let state = MatchState(
                     pairKey: pair, dateKey: dateKey, competition: competition,
                     status: status,

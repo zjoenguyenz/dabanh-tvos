@@ -206,10 +206,21 @@ enum DivisionClassifier {
     // West Ham, Wolves, Girona, St. Pauli, Wolfsburg…), which
     // is exactly why the both-clubs rule ALSO requires neither
     // club in the division-1 set — those names can never file
-    // a fixture as division 2 while they sit in the top set. Names are stored pre-normalised with the
-    // fixture identity's normalisation (lowercase, diacritics
-    // stripped, filler tokens dropped) so membership tests are
-    // plain set lookups over MatchPairKey-normalised names.
+    // a fixture as division 2 while they sit in the top set.
+    // Names are stored pre-normalised in the canonical-key form
+    // (TeamNameNorm.canonicalKey — the ONE shared module since
+    // 1.4.5) so membership tests are plain set lookups over
+    // canonicalised names. The sets were RE-DERIVED through the
+    // new key for 1.4.5 (the corpus run of 2026-11-20): five
+    // entries changed form — "athletic bilbao" → "athletic",
+    // "ac milan" → "milan", "borussia monchengladbach" →
+    // "borussia gladbach", "alaves" → "deportivo alaves" (the
+    // FIX-127E alias synced from iOS in this same build), and
+    // "stade de reims" dropped (its canonical form "reims" was
+    // already listed) — every other entry's canonical form is
+    // the entry itself. Any future
+    // change to the canonical pipeline must re-derive these
+    // sets in the same build, or S3 filing silently breaks.
 
     private static let championshipSet: Set<String> = [
         "birmingham city", "blackburn rovers", "bolton wanderers", "bristol city",
@@ -236,7 +247,7 @@ enum DivisionClassifier {
         "nancy lorraine", "nancy", "annecy", "boulogne", "clermont foot",
         "dijon", "dunkerque", "grenoble", "guingamp", "metz", "montpellier",
         "nantes", "pau", "red star", "rodez", "saint etienne", "sochaux",
-        "stade laval", "laval", "stade de reims", "reims",
+        "stade laval", "laval", "reims",
     ]
     private static let bundesliga2Set: Set<String> = [
         "heidenheim", "magdeburg", "nurnberg", "arminia bielefeld",
@@ -256,7 +267,7 @@ enum DivisionClassifier {
         "tottenham hotspur", "tottenham", "west ham united", "west ham", "wolves",
     ]
     private static let laLigaSet: Set<String> = [
-        "alaves", "athletic bilbao", "atletico madrid", "barcelona", "celta vigo",
+        "deportivo alaves", "athletic", "atletico madrid", "barcelona", "celta vigo",
         "elche", "espanyol", "getafe", "girona", "levante", "mallorca",
         "osasuna", "oviedo", "rayo vallecano", "real betis", "real madrid",
         "real sociedad", "sevilla", "valencia", "villarreal",
@@ -264,7 +275,7 @@ enum DivisionClassifier {
     private static let serieASet: Set<String> = [
         "atalanta", "bologna", "cagliari", "como", "cremonese", "fiorentina",
         "genoa", "hellas verona", "inter", "juventus", "lazio", "lecce",
-        "ac milan", "napoli", "parma", "pisa", "roma", "sassuolo", "torino",
+        "milan", "napoli", "parma", "pisa", "roma", "sassuolo", "torino",
         "udinese",
     ]
     private static let ligue1Set: Set<String> = [
@@ -274,7 +285,7 @@ enum DivisionClassifier {
     ]
     private static let bundesligaSet: Set<String> = [
         "augsburg", "bayer leverkusen", "bayern munich", "borussia dortmund",
-        "borussia monchengladbach", "eintracht frankfurt", "freiburg",
+        "borussia gladbach", "eintracht frankfurt", "freiburg",
         "hamburger sv", "hamburg", "heidenheim", "hoffenheim", "cologne", "mainz",
         "rb leipzig", "st pauli", "stuttgart", "union berlin",
         "werder bremen", "wolfsburg",
@@ -304,8 +315,9 @@ enum DivisionClassifier {
 
     private static func normalized(_ name: String) -> String {
         // The roster sets are written in canonical-key form
-        // (Addendum 2 matcher), so membership tests canonicalise
-        // with the same function the matcher uses.
+        // (TeamNameNorm, since 1.4.5 — re-derived in that build),
+        // so membership tests canonicalise with the same function
+        // the matcher uses.
         MatchPairKey.canonicalTeam(name)
     }
 
