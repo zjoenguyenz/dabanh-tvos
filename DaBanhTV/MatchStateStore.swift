@@ -18,6 +18,30 @@ import Foundation
 /// upgrade a FotMob day-feed state (same source family), capped at
 /// 4 detail calls per poll cycle, live fixtures first.
 ///
+/// 1.4.6 (FL-331): the fetch layer was diffed field-by-field
+/// against the iOS reference implementation (dabanh-ios — the
+/// build whose four layers are all alive on the owner's iPhone)
+/// and the convicted drifts were aligned: the FotMob day param
+/// is yyyyMMdd (the old "YYYY-MM-DD" was answered with a literal
+/// null body — the layer decoded 0 states), LiveScore scores
+/// decode as the strings the wire actually sends (the Int? DTO
+/// failed the whole feed decode), the shared GET carries the
+/// iOS user-agent, ESPN failures are logged per board
+/// (slug + day + outcome), the fifa.worldq.uefa board is
+/// polled, FotMob kickoff falls back status.utcTime →
+/// match.utcTime with the feed's own day as the dateKey
+/// fallback (never the fetch instant), the detail parser reads
+/// player.name + goalDescription (penalty / own-goal flags),
+/// and the detail-upgrade pass covers finished FotMob states
+/// too. Two iOS shapes were deliberately NOT adopted, each
+/// against this tree's own measured evidence: the ESPN day
+/// window stays US-Eastern (KH-4 — the ICT window silently
+/// missed the Americas fixtures ESPN files under the Eastern
+/// day) and LiveScore keeps its kickoff-free binding (KH-9 —
+/// the Esd stamp's timezone measured UTC+3 against ESPN, so no
+/// instant is derived from it). The merge, the staleness guard
+/// and filledFromPool were re-verified iOS-shaped and untouched.
+///
 /// Poll cadence (plan §1.7): 60 s while anything is in its live
 /// window or matched-live, else 15 min. Last-good states are kept
 /// 30 min, then overrides drop (never worse than the computed
@@ -515,18 +539,27 @@ final class MatchStateStore: ObservableObject {
                 merged[key] = state
             }
         }
-        // FotMob detail upgrade: a live FotMob day-feed state with
-        // no events yet earns a matchDetails call, capped at 4 per
+        // FotMob detail upgrade: a FotMob day-feed state with no
+        // events yet earns a matchDetails call, capped at 4 per
         // cycle, live fixtures first (plan §1.2). Same source
         // family, so adding events to the day-feed state is the
-        // one allowed upgrade.
+        // one allowed upgrade. (1.4.6: finished states are
+        // eligible too — the iOS cadence; a 90+' fixture whose
+        // FotMob state never earned its scorers/cards was
+        // exactly the owner's FL-331 photograph.)
         var detailBudget = Self.fotmobDetailCap
         let detailCandidates = merged
             .filter { $0.value.source == .fotmob
-                && ($0.value.status == .live || $0.value.status == .ht)
+                && ($0.value.status == .live || $0.value.status == .ht
+                    || $0.value.status == .ft)
                 && $0.value.events.isEmpty && $0.value.fotmobID != nil }
             .map { $0.key }
-            .sorted()
+            .sorted { a, b in
+                let liveRankA = (merged[a]?.status == .ft) ? 1 : 0
+                let liveRankB = (merged[b]?.status == .ft) ? 1 : 0
+                if liveRankA != liveRankB { return liveRankA < liveRankB }
+                return a < b
+            }
         for key in detailCandidates where detailBudget > 0 {
             guard let state = merged[key], let fid = state.fotmobID else { continue }
             detailBudget -= 1
@@ -723,11 +756,29 @@ final class MatchStateStore: ObservableObject {
         return cal
     }
 
-    /// "YYYY-MM-DD" for FotMob's date= parameter, the date read
-    /// in the given calendar.
+    /// "yyyyMMdd" for FotMob's date= parameter, the date read
+    /// in the given calendar. (1.4.6, FL-331: the old
+    /// "YYYY-MM-DD" form is answered by FotMob with a literal
+    /// null body — measured 4 bytes against 112,601 bytes of
+    /// real JSON for the yyyyMMdd form — so the layer decoded
+    /// zero states on every cycle.)
     nonisolated private static func fotmobDayString(_ date: Date, calendar: Calendar) -> String {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+        return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// The UTC start of the day a yyyyMMdd FotMob day-param
+    /// names — the fallback dateKey for a match whose kickoff
+    /// stamp is missing (1.4.6: the iOS shape; the old code fell
+    /// back to the fetch instant, stamping the state with
+    /// whatever day the poll happened to run on).
+    nonisolated private static func fotmobDayStart(_ dayParam: String) -> Date? {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyyMMdd"
+        return f.date(from: dayParam)
     }
 
     /// ICT date key in FixtureGrouping.stampDateKey form.
@@ -761,7 +812,13 @@ final class MatchStateStore: ObservableObject {
     /// One ESPN board fetch's product: the states it produced
     /// plus how the fetch itself ended — "ok", "http-<code>",
     /// "error" (transport) or "decode" (200 but unparseable).
+    /// slug + day ride along so fetchESPN can log EVERY failed
+    /// board individually (1.4.6, FL-331: the 1.4.5 device log
+    /// could only print the first failure's kind, so an
+    /// all-boards failure was undiagnosable from one log).
     private struct BoardFetch: Sendable {
+        let slug: String
+        let day: String
         let states: [MatchState]
         let outcome: String
     }
@@ -782,7 +839,7 @@ final class MatchStateStore: ObservableObject {
     nonisolated private static func getDetailed(_ url: URL, headers: [String: String] = [:]) async -> HTTPOutcome {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        request.setValue("Mozilla/5.0 (Linux; Android 14; TV)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
@@ -828,7 +885,7 @@ final class MatchStateStore: ObservableObject {
                 }
                 struct Detail: Decodable {
                     struct Kind: Decodable { let text: String? }
-                    struct Athlete: Decodable { let displayName: String? }
+                    struct Athlete: Decodable { let displayName: String?; let shortName: String? }
                     struct Clock: Decodable { let displayValue: String? }
                     struct TeamRef: Decodable { let id: String? }
                     let type: Kind?
@@ -873,7 +930,11 @@ final class MatchStateStore: ObservableObject {
             for await board in group {
                 totalBoards += 1
                 if board.outcome == "ok" { okBoards += 1 }
-                else if firstFailure == nil { firstFailure = board.outcome }
+                else {
+                    if firstFailure == nil { firstFailure = board.outcome }
+                    DiagLog.write("fetch", "espn board fail slug=\(board.slug) "
+                        + "day=\(board.day) outcome=\(board.outcome)")
+                }
                 for s in board.states { out[s.storageKey] = s }
             }
         }
@@ -891,16 +952,16 @@ final class MatchStateStore: ObservableObject {
 
     nonisolated private static func fetchESPNBoard(slug: String, day: String) async -> BoardFetch {
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(slug)/scoreboard?dates=\(day)") else {
-            return BoardFetch(states: [], outcome: "error")
+            return BoardFetch(slug: slug, day: day, states: [], outcome: "error")
         }
         let data: Data
         switch await getDetailed(url) {
         case .ok(let payload): data = payload
-        case .http(let code): return BoardFetch(states: [], outcome: "http-\(code)")
-        case .failed: return BoardFetch(states: [], outcome: "error")
+        case .http(let code): return BoardFetch(slug: slug, day: day, states: [], outcome: "http-\(code)")
+        case .failed: return BoardFetch(slug: slug, day: day, states: [], outcome: "error")
         }
         guard let board = try? JSONDecoder().decode(ESPNBoard.self, from: data) else {
-            return BoardFetch(states: [], outcome: "decode")
+            return BoardFetch(slug: slug, day: day, states: [], outcome: "decode")
         }
         let competition = CompetitionID(espnSlug: slug)
         var out: [MatchState] = []
@@ -931,7 +992,7 @@ final class MatchStateStore: ObservableObject {
                 if let tid = d.team?.id, tid == home.team?.id { isHome = true }
                 else if let tid = d.team?.id, tid == away.team?.id { isHome = false }
                 else { continue }
-                let name = d.athletesInvolved?.first?.displayName ?? ""
+                let name = d.athletesInvolved?.first.flatMap { $0.shortName ?? $0.displayName } ?? ""
                 let minute = d.clock?.displayValue ?? ""
                 let text = (d.type?.text ?? "").lowercased()
                 if d.scoringPlay == true {
@@ -975,7 +1036,7 @@ final class MatchStateStore: ObservableObject {
                 homeName: homeName, awayName: awayName,
                 logoHome: home.team?.logo, logoAway: away.team?.logo))
         }
-        return BoardFetch(states: out, outcome: "ok")
+        return BoardFetch(slug: slug, day: day, states: out, outcome: "ok")
     }
 
     // MARK: - FotMob (fallback)
@@ -994,6 +1055,7 @@ final class MatchStateStore: ObservableObject {
                 struct Status: Decodable {
                     struct LiveTime: Decodable { let short: String?; let long: String? }
                     let scoreStr: String?
+                    let ftScoreStr: String?
                     let finished: Bool?
                     let ongoing: Bool?
                     let started: Bool?
@@ -1004,6 +1066,12 @@ final class MatchStateStore: ObservableObject {
                 let home: Side?
                 let away: Side?
                 let status: Status?
+                /// Match-level kickoff stamp — the fallback when
+                /// status.utcTime is absent (1.4.6, the iOS read
+                /// order; the day feed currently files the stamp
+                /// inside status on every match, measured
+                /// 172/172 against 0/172 at match level).
+                let utcTime: String?
             }
             let name: String?
             let ccode: String?
@@ -1079,13 +1147,14 @@ final class MatchStateStore: ObservableObject {
                     status = (st.liveTime?.short ?? "").uppercased().contains("HT") ? .ht : .live
                 } else { status = .pre }
                 var sh: Int? = nil, sa: Int? = nil
-                if let score = st.scoreStr {
+                if let score = st.scoreStr ?? st.ftScoreStr {
                     let parts = score.split(separator: "-")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                     if parts.count == 2 { sh = Int(parts[0]); sa = Int(parts[1]) }
                 }
-                let kickoff = st.utcTime.flatMap { isoDate($0) }
+                let kickoff = (st.utcTime ?? m.utcTime).flatMap { isoDate($0) }
                 let dateKey = kickoff.map { FixtureGrouping.stampDateKey(of: $0) }
+                    ?? fotmobDayStart(day).map { FixtureGrouping.stampDateKey(of: $0) }
                     ?? FixtureGrouping.stampDateKey(of: Date())
                 // FotMob's day feed carries no logo field — only
                 // the team id — but FotMob serves every badge from
@@ -1123,11 +1192,21 @@ final class MatchStateStore: ObservableObject {
             struct Facts: Decodable {
                 struct Events: Decodable {
                     struct Event: Decodable {
+                        struct Player: Decodable { let name: String? }
                         let type: String?
                         let card: String?
                         let time: Int?
                         let isHome: Bool?
                         let nameStr: String?
+                        /// The acting player (1.4.6, the iOS
+                        /// DTO shape; nameStr stays decoded as
+                        /// the fallback spelling).
+                        let player: Player?
+                        /// "Penalty" / "Own Goal" ride here on
+                        /// goal events (1.4.6) — without it a
+                        /// penalty or own goal rendered as an
+                        /// ordinary goal, the iOS RC2 lesson.
+                        let goalDescription: String?
                     }
                     let events: [Event]?
                 }
@@ -1145,11 +1224,14 @@ final class MatchStateStore: ObservableObject {
         var out: [MatchEvent] = []
         for e in decoded.content?.matchFacts?.events?.events ?? [] {
             let minute = e.time.map { "\($0)'" } ?? ""
-            let name = e.nameStr ?? ""
+            let name = e.player?.name ?? e.nameStr ?? ""
             guard let isHome = e.isHome else { continue }
             if e.type == "Goal" {
+                let desc = e.goalDescription ?? ""
                 out.append(MatchEvent(kind: .goal, minuteText: minute, playerName: name,
-                                      isHome: isHome, isPenalty: false, isOwnGoal: false))
+                                      isHome: isHome,
+                                      isPenalty: desc.contains("Penalty"),
+                                      isOwnGoal: desc.contains("Own Goal")))
             } else if e.type == "Card" {
                 out.append(MatchEvent(kind: e.card == "Red" ? .redCard : .yellowCard,
                                       minuteText: minute, playerName: name,
@@ -1261,8 +1343,14 @@ final class MatchStateStore: ObservableObject {
             struct Event: Decodable {
                 struct Team: Decodable { let Nm: String? }
                 let Eps: String?
-                let Tr1: Int?
-                let Tr2: Int?
+                /// Scores ride as STRINGS on this wire
+                /// (measured on the saved live + date payloads:
+                /// every Tr1/Tr2 is a JSON string). The pre-1.4.6
+                /// Int? DTO threw on the first scored event and
+                /// the whole feed decoded to zero states
+                /// (FL-331).
+                let Tr1: String?
+                let Tr2: String?
                 let T1: [Team]?
                 let T2: [Team]?
             }
@@ -1308,7 +1396,7 @@ final class MatchStateStore: ObservableObject {
                 let state = MatchState(
                     pairKey: pair, dateKey: todayKey, competition: nil,
                     status: status, minuteText: minute,
-                    scoreHome: e.Tr1, scoreAway: e.Tr2,
+                    scoreHome: e.Tr1.flatMap { Int($0) }, scoreAway: e.Tr2.flatMap { Int($0) },
                     events: [],
                     source: .livescore, fetchedAt: Date(), kickoff: nil, fotmobID: nil,
                     homeName: nil, awayName: nil,

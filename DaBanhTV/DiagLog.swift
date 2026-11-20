@@ -248,8 +248,12 @@ enum FocusSignpost {
 
 /// The tiny HTTP server behind the log screen: while the
 /// screen is open it serves DiagLog's file at
-/// http://<Apple-TV-LAN-IP>:18080/log to ANY path, as a
-/// download named dabanh-diag.txt. It exists only for the
+/// http://<Apple-TV-LAN-IP>:18082/log to ANY path, as a
+/// download named dabanh-diag.txt. (Port 18082 since 1.4.6,
+/// FL-332: a fixed port is a DEVICE-wide resource — 18080 is
+/// JoeTV's on this Apple TV and 18081 is JTV tvOS's, so the
+/// old 18080 bind died with NWError 48 whenever a sibling
+/// app's listener was bound first.) It exists only for the
 /// screen's lifetime (the view starts it on appear and stops
 /// it on disappear), binds no authentication — the file is
 /// already URL-scrubbed by DiagLog — and serves nothing else.
@@ -281,12 +285,13 @@ final class DiagLogServer {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
 
-    /// Start serving on port 18080. Idempotent while a
+    /// Start serving on port 18082. Idempotent while a
     /// listener is alive.
     func start() {
         guard listener == nil else { return }
+        DiagLog.write("logserver", "start requested port=18082")
         emit(.starting)
-        guard let port = NWEndpoint.Port(rawValue: 18080) else {
+        guard let port = NWEndpoint.Port(rawValue: 18082) else {
             emit(.failed("Không mở được kênh gửi log (cổng không hợp lệ)."))
             return
         }
@@ -331,9 +336,11 @@ final class DiagLogServer {
                 emit(.failed("Không tìm thấy địa chỉ mạng nội bộ"))
                 return
             }
+            DiagLog.write("logserver", "listener bound on \(port.rawValue)")
             emit(.serving(url: "http://\(ip):\(port.rawValue)/log"))
         case .failed(let error):
             if self.listener === listener { self.listener = nil }
+            DiagLog.write("logserver", "listener failed: \(error.localizedDescription)")
             emit(.failed("Kênh gửi log lỗi: \(error.localizedDescription)"))
         case .cancelled:
             if self.listener === listener { self.listener = nil }

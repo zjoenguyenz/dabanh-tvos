@@ -118,6 +118,13 @@ enum CompetitionID: String, Equatable, Sendable {
         "fra.1", "fra.2", "ger.1", "ger.2", "bra.1",
         "uefa.champions", "uefa.europa", "uefa.europa.conf",
         "uefa.womens.champions",
+        // 1.4.6 (FL-331): the iOS board list also polls the
+        // World Cup qualifying board; tvOS never did, so those
+        // fixtures had no ESPN layer at all. CompetitionID has
+        // no case for it, so its states carry competition=nil
+        // and file by the conservative rules, exactly like an
+        // unidentified league — identification is never guessed.
+        "fifa.worldq.uefa",
     ]
 
     /// Country league rank this competition belongs to (League
