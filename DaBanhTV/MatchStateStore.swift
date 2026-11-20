@@ -395,8 +395,8 @@ final class MatchStateStore: ObservableObject {
         // counts, the merged total, the ESPN day window used —
         // plus the live-window fixtures no layer bound (the
         // bind-miss evidence ĐG-3 made impossible to collect).
-        DiagLog.write("poll", "espn=\(espnStates.count) fotmob=\(fotmobStates.count) "
-            + "flash=\(flashscoreStates.count) livescore=\(livescoreStates.count) "
+        DiagLog.write("poll", "espn=\(layers[0].count) fotmob=\(layers[1].count) "
+            + "flash=\(layers[2].count) livescore=\(layers[3].count) "
             + "merged=\(next.count) espnDays=\(days.joined(separator: ","))")
         if let fixtures = fixturesProvider?() {
             var misses: [String] = []
