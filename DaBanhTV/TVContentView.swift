@@ -1202,6 +1202,10 @@ struct TVContentView: View {
                         .font(.system(size: 24))
                         .foregroundStyle(TVPalette.heroMeta)
                         .lineLimit(1)
+                    if let state = entry.state,
+                       let home = state.scoreHome, let away = state.scoreAway {
+                        heroScoreBlock(state, home: home, away: away)
+                    }
                     HStack(spacing: 10) {
                         Text("Xem ngay")
                             .font(.system(size: 24, weight: .semibold))
@@ -1228,6 +1232,85 @@ struct TVContentView: View {
         }
         .tvCardButton()
         .focused($focusedKey, equals: "hero:" + entry.id)
+    }
+
+    /// 1.4.7: the hero's score + events block. The entry's bound
+    /// state already carried the score and the events — the
+    /// badge minute and the crest fallback read them — but the
+    /// hero never rendered them (the tiles did, via
+    /// TVLiveBoardView). Content mirrors the board family: the
+    /// scoreCentre digits, then per-side event lines — goals
+    /// first, then cards, at most 3 lines a side plus a "+N"
+    /// overflow line (the iOS board's rule), in the tvOS
+    /// board's line idiom (card glyph, name, minute). Rendered
+    /// only when the state carries a score; otherwise the hero
+    /// is exactly the 1.4.6 hero.
+    private func heroScoreBlock(_ state: MatchState, home: Int, away: Int) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Text("\(home)")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(.white)
+                Text("-")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(TVPalette.dashTx)
+                Text("\(away)")
+                    .font(.system(size: 69, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .lineLimit(1)
+            if !state.events.isEmpty {
+                Rectangle()
+                    .fill(TVPalette.eventsLine)
+                    .frame(height: 1)
+                HStack(alignment: .top, spacing: 16) {
+                    heroEventColumn(events: state.events.filter { $0.isHome },
+                                    alignRight: false)
+                    heroEventColumn(events: state.events.filter { !$0.isHome },
+                                    alignRight: true)
+                }
+            }
+        }
+    }
+
+    private func heroEventColumn(events: [MatchEvent], alignRight: Bool) -> some View {
+        // Goals before cards; each kind keeps the state's own
+        // order. Cap 3 lines, the rest collapse into "+N".
+        let ordered = events.filter { $0.kind == .goal }
+            + events.filter { $0.kind != .goal }
+        return VStack(alignment: alignRight ? .trailing : .leading, spacing: 4) {
+            ForEach(Array(ordered.prefix(3).enumerated()), id: \.offset) { _, event in
+                heroEventLine(event, alignRight: alignRight)
+            }
+            if ordered.count > 3 {
+                Text("+\(ordered.count - 3)")
+                    .font(.system(size: 19))
+                    .foregroundStyle(TVPalette.evMin)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity,
+                           alignment: alignRight ? .trailing : .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
+    }
+
+    private func heroEventLine(_ event: MatchEvent, alignRight: Bool) -> some View {
+        HStack(spacing: 7) {
+            if event.kind != .goal {
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
+                    .frame(width: 12, height: 16)
+            }
+            Text(event.playerName)
+                .font(.system(size: 19))
+                .foregroundStyle(TVPalette.evTx)
+                .lineLimit(1)
+            Text(event.minuteText)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(TVPalette.evMin)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
     }
 
     private func englishHero(_ ch: Channel) -> some View {
