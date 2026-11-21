@@ -411,38 +411,35 @@ struct TVContentView: View {
 
     /// The channel copy for a folded league, in the Đức
     /// round's wording pattern: the channel rail's title and
-    /// subtitle, the card's play-line prefix and the hero's
-    /// channel line. Only ever called with a fold league; the
+    /// subtitle and the card's play-line prefix. (A fourth
+    /// element, the hero's channel line, left with the slim
+    /// hero in 1.5.0 — the hero carries no meta line now.)
+    /// Only ever called with a fold league; the
     /// Anh / Khác arm exists so the switch is exhaustive, and
     /// its text is never rendered.
     private func leagueChannelCopy(_ league: League)
-        -> (railTitle: String, railSubtitle: String, cardPrefix: String, heroLine: String) {
+        -> (railTitle: String, railSubtitle: String, cardPrefix: String) {
         switch league {
         case .spain:
             return ("📺  NUVIO · KÊNH GIẢI TÂY BAN NHA",
                     "Kênh La Liga từ addon Nuvio — phát liên tục.",
-                    "Kênh giải Tây Ban Nha",
-                    "Kênh giải Tây Ban Nha · phát liên tục")
+                    "Kênh giải Tây Ban Nha")
         case .italy:
             return ("📺  NUVIO · KÊNH GIẢI Ý",
                     "Kênh Serie A từ addon Nuvio — phát liên tục.",
-                    "Kênh giải Ý",
-                    "Kênh giải Ý · phát liên tục")
+                    "Kênh giải Ý")
         case .france:
             return ("📺  NUVIO · KÊNH GIẢI PHÁP",
                     "Kênh Ligue 1 từ addon Nuvio — phát liên tục.",
-                    "Kênh giải Pháp",
-                    "Kênh giải Pháp · phát liên tục")
+                    "Kênh giải Pháp")
         case .germany:
             return ("📺  NUVIO · KÊNH GIẢI ĐỨC",
                     "Kênh Bundesliga từ addon Nuvio — phát liên tục.",
-                    "Kênh giải Đức",
-                    "Kênh giải Đức · phát liên tục")
+                    "Kênh giải Đức")
         case .england, .other, .cups:
             return ("📺  NUVIO · KÊNH 24/7",
                     "Kênh từ addon Nuvio — phát liên tục.",
-                    "Kênh Nuvio",
-                    "Kênh Nuvio · phát liên tục")
+                    "Kênh Nuvio")
         }
     }
 
@@ -947,7 +944,20 @@ struct TVContentView: View {
             // Hero stays FIXED above the rails (owner ruling 2026-11-13):
             // inside the ScrollView it got half-clipped whenever focus
             // dived down into the rails.
-            VStack(alignment: .leading, spacing: 22) {
+            // 1.5.0 vertical budget (1080 canvas, line ≈ 1.24 ×
+            // size): root pads 40 + 28 → 1012 for the root
+            // VStack; header 41 + tabBar 100 + status slot 24 +
+            // three 20-pt root spacings = 225 of chrome, leaving
+            // 787 for this body. Slim hero panel 366 + this
+            // VStack's 18 spacing → the rails' ScrollView
+            // viewport is 403. A fixture rail needs 37 (title)
+            // + 4 + 14 (top inset) + 342 (tile slot) = 397 for
+            // its tiles to stand FULLY visible at rest — 403 ≥
+            // 397, so the first rail's frames are whole again
+            // (1.4.9: viewport 193, the tile cut at ≈136 of
+            // 342 — the owner's "bị cắt" clip). The same 18
+            // spacing applies to the cup and EN bodies below.
+            VStack(alignment: .leading, spacing: 18) {
                 heroPanel
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 30) {
@@ -1021,7 +1031,7 @@ struct TVContentView: View {
     @ViewBuilder
     private var cupBody: some View {
         let now = Date()
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             heroPanel
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 30) {
@@ -1130,7 +1140,7 @@ struct TVContentView: View {
             }
             Spacer()
         } else {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 18) {
                 heroPanel
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 30) {
@@ -1206,41 +1216,41 @@ struct TVContentView: View {
 
     // MARK: - Hero
 
-    /// 1.4.8 (FL-331): the hero text column's FIXED height —
-    /// one height for every hero shape and every hero kind, so
-    /// a focus move never resizes the panel and nothing below
-    /// it shifts (the FL-109 rule: one fixed frame, never a
-    /// height derived from content). Sized for the fullest
-    /// fixture shape at the fonts in use (line ≈ 1.24 × size):
+    /// 1.5.0 (owner redesign ruling, 2026-11-21): the hero is
+    /// SLIM and SCORE-ONLY. 1.4.9's full cluster hero failed
+    /// his device test — the panel still ghosted on match
+    /// swaps and its 572 pt ate the first rail's tiles — so
+    /// the ruling shrinks the panel to the score essentials:
+    /// the status badge, the fixture headline (team names),
+    /// the big score digits, and the "Xem ngay" pill. Scorer
+    /// lists and the league · group · source meta line are
+    /// GONE from the hero; the full match info lives in the
+    /// link board's header now (TVMatchBoardView, spec
+    /// amendment 2026-11-21). The 1.4.9 frame discipline is
+    /// unchanged: ONE fixed frame for every hero kind and
+    /// state, every region a fixed-height slot, a kind change
+    /// a value change in an unchanging structure, the nil
+    /// hero the same frame unfocusable.
+    ///
+    /// Slots (line ≈ 1.24 × size, the house convention):
     /// badge 40 (21 pt + its vertical padding) + headline 114
-    /// (46 pt × 2 lines) + meta 30 (24 pt) + score block 219
-    /// (score 86 + divider and spacings 25 + four event lines
-    /// 108) + "Xem ngay" 54 (24 pt + padding) + the column's
-    /// four 14-pt spacings 56 ≈ 513 — the constant carries a
-    /// few points of slack, and shorter content leaves the
-    /// space empty at the bottom (the column is top-aligned),
-    /// exactly as iOS's fixed 300×176 board frame leaves its
-    /// events area empty. No animation touches the hero's
-    /// height or content swap.
-    private static let heroColumnHeight: CGFloat = 516
+    /// (46 pt × 2 lines) + score slot 86 (the 69-pt digits'
+    /// line — digits or empty, never the event columns) +
+    /// "Xem ngay" 54 (24 pt + padding) + the column's three
+    /// 12-pt spacings 36 = 330. Panel = 330 + 2×18 vertical
+    /// padding = 366 (was 572). The vertical budget this buys
+    /// is stated at scrollBody: the first rail's tiles now
+    /// stand FULLY inside the resting viewport.
+    private static let heroColumnHeight: CGFloat = 330
 
-    /// 1.4.9 (FL-360): the hero's INTERNAL slots — the 1.4.8
-    /// pin held the panel but not its contents: the score
-    /// block's presence moved "Xem ngay" ≈219 pt and a 1-line
-    /// vs 2-line headline moved everything below it ≈57 pt,
-    /// INSIDE the fixed panel, on every focus move between
-    /// unlike fixtures and when events landed on a poll. Each
-    /// region of the column now holds its fullest height in
-    /// EVERY state (badge 40, headline 114 = 2 lines, meta 30,
-    /// score slot 217 = digits 86 + spacings 24 + divider 1 +
-    /// event area 106): content fills its slot or the slot
-    /// stays empty — nothing resizes, nothing rides. Column
-    /// total: 40 + 114 + 30 + 217 + 54 + 4×14 spacing = 511
-    /// ≤ 516 (the 1.4.8 slack absorbs the rounding).
+    /// 1.4.9 (FL-360) slot discipline, kept at the slim
+    /// hero's sizes: each region holds its height in EVERY
+    /// state — content fills its slot or the slot stays
+    /// empty, so nothing resizes and nothing rides, on focus
+    /// moves, hero-kind changes, or the 60 s poll.
     private static let heroBadgeSlotHeight: CGFloat = 40
     private static let heroHeadlineSlotHeight: CGFloat = 114
-    private static let heroMetaSlotHeight: CGFloat = 30
-    private static let heroScoreSlotHeight: CGFloat = 217
+    private static let heroScoreSlotHeight: CGFloat = 86
 
     /// 1.4.9 (FL-360): the hero's content as DATA. In 1.4.8
     /// three DIFFERENT view trees (fixtureHero / englishHero /
@@ -1257,8 +1267,6 @@ struct TVContentView: View {
         var badgeText: String
         var badgeColor: Color
         var headline: String
-        var meta: String
-        var scoreState: MatchState? = nil
         var scoreHome: Int? = nil
         var scoreAway: Int? = nil
         var art: HeroArt
@@ -1266,12 +1274,12 @@ struct TVContentView: View {
 
         /// The no-hero shell (heroItem == nil while the tab
         /// body renders): every slot empty, so the panel holds
-        /// its full 572 pt instead of collapsing to the 0 pt
+        /// its full 366 pt instead of collapsing to the 0 pt
         /// EmptyView 1.4.8 rendered — the audit's S-5 case
         /// (a folded league tab whose fixtures are empty but
         /// whose addon rails exist).
         static let empty = HeroModel(badgeText: "", badgeColor: TVPalette.tealFill,
-                                     headline: "", meta: "",
+                                     headline: "",
                                      art: .soccer, focusKey: "")
     }
 
@@ -1323,11 +1331,10 @@ struct TVContentView: View {
             art = .soccer
         }
         var model = HeroModel(badgeText: badge.text, badgeColor: badge.color,
-                              headline: entry.headline, meta: heroMeta(entry),
+                              headline: entry.headline,
                               art: art, focusKey: "hero:" + entry.id)
         if let state = entry.state,
            let home = state.scoreHome, let away = state.scoreAway {
-            model.scoreState = state
             model.scoreHome = home
             model.scoreAway = away
         }
@@ -1338,7 +1345,6 @@ struct TVContentView: View {
         HeroModel(badgeText: "🌍 BLV TIẾNG ANH · KÊNH 24/7",
                   badgeColor: TVPalette.tealFill,
                   headline: TVEnglish.displayName(ch),
-                  meta: "Kênh tiếng Anh · phát liên tục · nguồn dự phòng khi nguồn Việt chậm hoặc chết",
                   art: ch.logoURL != nil ? .logo(ch) : .tvGlyph,
                   focusKey: "heroEN:" + ch.url)
     }
@@ -1358,7 +1364,7 @@ struct TVContentView: View {
         }
         return HeroModel(badgeText: nuvioHeroBadge(item),
                          badgeColor: nuvioHeroBadgeColor(item),
-                         headline: item.headline, meta: nuvioHeroMeta(item),
+                         headline: item.headline,
                          art: art, focusKey: "heroNV:" + item.id)
     }
 
@@ -1385,7 +1391,7 @@ struct TVContentView: View {
 
     private func heroLabel(_ model: HeroModel, chrome: Bool) -> some View {
         HStack(alignment: .center, spacing: 36) {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 Group {
                     if chrome {
                         Text(model.badgeText)
@@ -1406,20 +1412,18 @@ struct TVContentView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .frame(height: Self.heroHeadlineSlotHeight, alignment: .topLeading)
-                Text(model.meta)
-                    .font(.system(size: 24))
-                    .foregroundStyle(TVPalette.heroMeta)
-                    .lineLimit(1)
-                    .frame(height: Self.heroMetaSlotHeight, alignment: .topLeading)
-                // The score slot: the fullest score block's
-                // height in every state — the block fills it
-                // (digits, then divider + events when they
-                // land) or it stays empty. "Xem ngay" below
-                // therefore sits at ONE Y for every hero.
+                // The score slot (1.5.0): the DIGITS ONLY, at
+                // their one line height in every state — the
+                // digits fill it or it stays empty. The event
+                // columns the 1.4.7–1.4.9 hero carried under
+                // the digits live in the link board's header
+                // now (the owner's redesign ruling: the hero
+                // records the score, the board carries the
+                // info). "Xem ngay" below therefore sits at
+                // ONE Y for every hero.
                 Group {
-                    if let state = model.scoreState,
-                       let home = model.scoreHome, let away = model.scoreAway {
-                        heroScoreBlock(state, home: home, away: away)
+                    if let home = model.scoreHome, let away = model.scoreAway {
+                        TVScoreDigits(home: home, away: away)
                     } else {
                         Color.clear
                     }
@@ -1455,7 +1459,10 @@ struct TVContentView: View {
             heroArtView(model.art)
         }
         .padding(.horizontal, 40)
-        .padding(.vertical, 28)
+        // 1.5.0: vertical padding 28 → 18 — part of the
+        // slim hero's budget (panel 366, not 386); the
+        // horizontal padding is unchanged.
+        .padding(.vertical, 18)
         .frame(maxWidth: .infinity)
         .background(tvHeroBackground(focused: focusedKey == model.focusKey))
     }
@@ -1501,102 +1508,6 @@ struct TVContentView: View {
         item.kind == .liveEvent ? TVPalette.liveRed : TVPalette.tealFill
     }
 
-    private func nuvioHeroMeta(_ item: NuvioItem) -> String {
-        var parts: [String] = []
-        if let league = item.league { parts.append(league) }
-        if item.kind == .channel {
-            // A league-fold channel focused in its own league
-            // tab is that league's channel, not an English one.
-            if let league = foldLeague, leagueAddonChannels.contains(item) {
-                parts.append(leagueChannelCopy(league).heroLine)
-            } else {
-                parts.append("Kênh tiếng Anh · phát liên tục")
-            }
-        } else {
-            parts.append("Trận đấu qua addon Nuvio")
-        }
-        return parts.joined(separator: "  ·  ")
-    }
-
-    /// 1.4.7: the hero's score + events block. The entry's bound
-    /// state already carried the score and the events — the
-    /// badge minute and the crest fallback read them — but the
-    /// hero never rendered them (the tiles did, via
-    /// TVLiveBoardView). Content mirrors the board family: the
-    /// scoreCentre digits, then per-side event lines — goals
-    /// first, then cards, at most 3 lines a side plus a "+N"
-    /// overflow line (the iOS board's rule), in the tvOS
-    /// board's line idiom (card glyph, name, minute). Rendered
-    /// only when the state carries a score; otherwise the hero
-    /// is exactly the 1.4.6 hero.
-    private func heroScoreBlock(_ state: MatchState, home: Int, away: Int) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Text("\(home)")
-                    .font(.system(size: 69, weight: .bold))
-                    .foregroundStyle(.white)
-                Text("-")
-                    .font(.system(size: 69, weight: .bold))
-                    .foregroundStyle(TVPalette.dashTx)
-                Text("\(away)")
-                    .font(.system(size: 69, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .lineLimit(1)
-            if !state.events.isEmpty {
-                Rectangle()
-                    .fill(TVPalette.eventsLine)
-                    .frame(height: 1)
-                HStack(alignment: .top, spacing: 16) {
-                    heroEventColumn(events: state.events.filter { $0.isHome },
-                                    alignRight: false)
-                    heroEventColumn(events: state.events.filter { !$0.isHome },
-                                    alignRight: true)
-                }
-            }
-        }
-    }
-
-    private func heroEventColumn(events: [MatchEvent], alignRight: Bool) -> some View {
-        // Goals before cards; each kind keeps the state's own
-        // order. Cap 3 lines, the rest collapse into "+N".
-        let ordered = events.filter { $0.kind == .goal }
-            + events.filter { $0.kind != .goal }
-        return VStack(alignment: alignRight ? .trailing : .leading, spacing: 4) {
-            ForEach(Array(ordered.prefix(3).enumerated()), id: \.offset) { _, event in
-                heroEventLine(event, alignRight: alignRight)
-            }
-            if ordered.count > 3 {
-                Text("+\(ordered.count - 3)")
-                    .font(.system(size: 19))
-                    .foregroundStyle(TVPalette.evMin)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity,
-                           alignment: alignRight ? .trailing : .leading)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
-    }
-
-    private func heroEventLine(_ event: MatchEvent, alignRight: Bool) -> some View {
-        HStack(spacing: 7) {
-            if event.kind != .goal {
-                RoundedRectangle(cornerRadius: 2.5)
-                    .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
-                    .frame(width: 12, height: 16)
-            }
-            Text(event.playerName)
-                .font(.system(size: 19))
-                .foregroundStyle(TVPalette.evTx)
-                .lineLimit(1)
-            Text(event.minuteText)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(TVPalette.evMin)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
-    }
-
     /// The fixture hero's badge with the matched state consulted
     /// (spec §1.4/§1.5): source minute verbatim, HT wording, or
     /// FT + final score — never PHÁT LẠI for a known FT.
@@ -1629,13 +1540,6 @@ struct TVContentView: View {
             color = TVPalette.tealFill
         }
         return (text, color)
-    }
-
-    private func heroMeta(_ entry: TVFixtureEntry) -> String {
-        var parts = [entry.leagueName]
-        if !entry.channel.group.isEmpty { parts.append(entry.channel.group) }
-        if entry.sourceCount > 1 { parts.append("\(entry.sourceCount) nguồn phát") }
-        return parts.joined(separator: "  ·  ")
     }
 
     // MARK: - Rails and cards

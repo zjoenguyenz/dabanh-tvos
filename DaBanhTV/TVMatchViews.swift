@@ -908,6 +908,104 @@ struct TVLiveBoardView: View {
     }
 }
 
+// MARK: - Score digits + event columns (shared: hero + board)
+
+/// The big score digits (69 pt, the board family's centre) —
+/// ONE rendering for the two surfaces that show a bare score:
+/// the slim hero's score slot (1.5.0) and the link board's
+/// full-info header. Nothing else rides along: no events, no
+/// meta — the digits are the score, whole.
+struct TVScoreDigits: View {
+    let home: Int
+    let away: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("\(home)")
+                .font(.system(size: 69, weight: .bold))
+                .foregroundStyle(.white)
+            Text("-")
+                .font(.system(size: 69, weight: .bold))
+                .foregroundStyle(TVPalette.dashTx)
+            Text("\(away)")
+                .font(.system(size: 69, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .lineLimit(1)
+    }
+}
+
+/// The per-side event columns under a divider: home events
+/// left-aligned under the home side, away events right-aligned
+/// under the away side — goals first, then cards, each kind in
+/// the state's own order, at most 3 lines a side plus a "+N"
+/// overflow line (the iOS board's rule), in the tvOS board's
+/// line idiom (card glyph, name, minute). This is the 1.4.7
+/// hero block's event rendering, moved here VERBATIM in 1.5.0
+/// when the full info moved from the hero to the link board's
+/// header (owner redesign ruling, 2026-11-21); the hero keeps
+/// only TVScoreDigits. Fullest height: divider 1 + spacing 12
+/// + four lines (4 × 24 + 3 × 4) = 121 — the number the board
+/// header reserves while a live board's events are still
+/// landing.
+struct TVEventColumns: View {
+    let state: MatchState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Rectangle()
+                .fill(TVPalette.eventsLine)
+                .frame(height: 1)
+            HStack(alignment: .top, spacing: 16) {
+                eventColumn(events: state.events.filter { $0.isHome },
+                            alignRight: false)
+                eventColumn(events: state.events.filter { !$0.isHome },
+                            alignRight: true)
+            }
+        }
+    }
+
+    private func eventColumn(events: [MatchEvent], alignRight: Bool) -> some View {
+        // Goals before cards; each kind keeps the state's own
+        // order. Cap 3 lines, the rest collapse into "+N".
+        let ordered = events.filter { $0.kind == .goal }
+            + events.filter { $0.kind != .goal }
+        return VStack(alignment: alignRight ? .trailing : .leading, spacing: 4) {
+            ForEach(Array(ordered.prefix(3).enumerated()), id: \.offset) { _, event in
+                eventLine(event, alignRight: alignRight)
+            }
+            if ordered.count > 3 {
+                Text("+\(ordered.count - 3)")
+                    .font(.system(size: 19))
+                    .foregroundStyle(TVPalette.evMin)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity,
+                           alignment: alignRight ? .trailing : .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
+    }
+
+    private func eventLine(_ event: MatchEvent, alignRight: Bool) -> some View {
+        HStack(spacing: 7) {
+            if event.kind != .goal {
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
+                    .frame(width: 12, height: 16)
+            }
+            Text(event.playerName)
+                .font(.system(size: 19))
+                .foregroundStyle(TVPalette.evTx)
+                .lineLimit(1)
+            Text(event.minuteText)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(TVPalette.evMin)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
+    }
+}
+
 // MARK: - Match tile (standard rail card)
 
 /// One fixture in a bucket rail: crest-vs-crest (or the channel
@@ -1093,7 +1191,13 @@ struct TVFixtureRail: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 16)
+                // 1.5.0: vertical inset 16 → 14 — part of
+                // the slim hero's budget (see the scrollBody
+                // note in TVContentView): the rail's tiles
+                // stand fully inside the resting viewport.
+                // The ring is strokeBorder (inside the tile
+                // frame), so 14 still clears it whole.
+                .padding(.vertical, 14)
             }
         }
         .onChange(of: focus) { _, key in

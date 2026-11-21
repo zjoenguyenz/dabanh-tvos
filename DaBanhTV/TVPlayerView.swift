@@ -472,10 +472,14 @@ private struct PlayerSurface: View {
 // MARK: - Link board (1.4.1, spec §2)
 
 /// The fixture's link board — the only place the VN/EN choice is
-/// made (spec §2.1). Header = the fixture's live cluster (§2.4:
-/// big score, minute/status badge, up to two event lines; with
-/// no matched state it shows the kickoff and the board is still
-/// usable — it never waits for state). Below: LINK TIẾNG VIỆT —
+/// made (spec §2.1). Header = the fixture's FULL match info
+/// (1.5.0, owner redesign ruling 2026-11-21 + spec §2.4 as
+/// amended): minute/status badge, headline, kickoff, the big
+/// score digits and the per-side event columns (every scorer,
+/// cards as glyph lines) — the whole cluster the slim hero no
+/// longer carries. With no matched state it shows the kickoff
+/// and the board is still usable — it never waits for state.
+/// Below: LINK TIẾNG VIỆT —
 /// the fixture's grouped mirror channels in ladder order,
 /// representative first, labelled by their cleaned titles
 /// verbatim (the trailing "(Name)" IS the commentator choice,
@@ -553,7 +557,7 @@ struct TVMatchBoardView: View {
         }
     }
 
-    // MARK: Header (the cluster, §2.4)
+    // MARK: Header (the full cluster, §2.4 as amended 2026-11-21)
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -587,77 +591,56 @@ struct TVMatchBoardView: View {
                     .foregroundStyle(.white)
                     .lineLimit(2)
                 Spacer(minLength: 0)
-                if let state = entry.state, let score = state.scoreText {
-                    Text(score)
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                } else if let kickoff = entry.channel.kickoff {
+                // 1.5.0: the kickoff keeps its place on the
+                // headline row in EVERY state — in 1.4.9 the
+                // score text displaced it, so a live board
+                // showed no kickoff at all. The score itself
+                // moves to the full block below.
+                if let kickoff = entry.channel.kickoff {
                     Text(TVKickoffFormat.timeDay.string(from: kickoff))
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundStyle(TVPalette.boardSky)
                         .lineLimit(1)
                 }
             }
-            if let state = entry.state, !state.events.isEmpty {
-                eventLines(state)
+            // 1.5.0 (owner redesign ruling): the FULL score
+            // block — the same rendering the hero carried in
+            // 1.4.7–1.4.9 (TVScoreDigits + TVEventColumns,
+            // TVMatchViews): digits, then the per-side event
+            // columns with every scorer and the card lines.
+            // It replaces the two-goal-lines-plus-card-counts
+            // summary this header showed before: inside the
+            // board is where the full info belongs ("vào
+            // trong thì hiện đủ thông tin").
+            if let state = entry.state,
+               let home = state.scoreHome, let away = state.scoreAway {
+                VStack(alignment: .leading, spacing: 12) {
+                    TVScoreDigits(home: home, away: away)
+                    if !state.events.isEmpty {
+                        TVEventColumns(state: state)
+                    } else if state.status == .live || state.status == .ht {
+                        // The S-4 reservation at the full
+                        // block's size: a live board whose
+                        // events have not landed reserves the
+                        // event columns' fullest height (121),
+                        // so the first goal/card arriving can
+                        // never push the source rows below
+                        // while the owner is reading them. A
+                        // finished board reserves nothing: its
+                        // events are final, and the space
+                        // would be dead.
+                        Color.clear
+                            .frame(height: 121)
+                    }
+                }
             } else if entry.state?.status == .live || entry.state?.status == .ht {
-                // 1.4.9 (FL-360, audit S-4): a live board whose
-                // events have not landed yet reserves the event
-                // lines' space (two goal lines + the card line
-                // at 19 pt with the cluster's spacing ≈ 81), so
-                // the first goal/card arriving can never push
-                // the source rows below while the owner is
-                // already reading them. A finished or upcoming
-                // board reserves nothing: its events are final
-                // or impossible, and the space would be dead.
+                // A live board whose SCORE has not landed
+                // either: reserve the whole block (digits 86
+                // + spacing 12 + event area 121 = 219), so
+                // its arrival moves nothing below.
                 Color.clear
-                    .frame(height: 81)
+                    .frame(height: 219)
             }
-        }
-    }
-
-    /// Up to two event lines (spec §2.4): goals first, then a
-    /// card-count line — the cluster, aggregated for the header.
-    private func eventLines(_ state: MatchState) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(Array(state.goals.prefix(2).enumerated()), id: \.offset) { _, goal in
-                HStack(spacing: 8) {
-                    Text("⚽")
-                        .font(.system(size: 19))
-                    Text(goal.playerName)
-                        .font(.system(size: 19))
-                        .foregroundStyle(TVPalette.evTx)
-                    Text(goal.minuteText)
-                        .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(TVPalette.evMin)
-                }
-            }
-            if state.homeYellow + state.awayYellow + state.homeRed + state.awayRed > 0 {
-                HStack(spacing: 14) {
-                    cardCount(yellow: state.homeYellow, red: state.homeRed)
-                    Text("·")
-                        .foregroundStyle(TVPalette.evTx)
-                    cardCount(yellow: state.awayYellow, red: state.awayRed)
-                }
-            }
-        }
-    }
-
-    private func cardCount(yellow: Int, red: Int) -> some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2.5)
-                .fill(TVPalette.cardY)
-                .frame(width: 12, height: 16)
-            Text("\(yellow)")
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(TVPalette.evMin)
-            RoundedRectangle(cornerRadius: 2.5)
-                .fill(TVPalette.cardR)
-                .frame(width: 12, height: 16)
-            Text("\(red)")
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(TVPalette.evMin)
         }
     }
 
