@@ -1,0 +1,43 @@
+table source: /home/hatch/workspace/dabanh-tvos/DaBanh/TeamNameNorm.swift
+playlist channels parsed: 485
+fixture groups: 134
+BOUND groups: 73  (channels in bound groups: 351)
+UNBOUND but feed fixture at same instant: 2
+unbound, no feed fixture near: 59
+
+PLAYLIST Pháp U17 vs Ả Rập Xê Út U17  -> pair 'a rap xe ut u17 vs france u17'
+   feed[fotmob]: 'france u17 vs saudi arabia u17'
+PLAYLIST Adhyaksa FC Banten vs Pusamania Borneo FC  -> pair 'adhyaksa banten vs borneo samarinda'
+   feed[fotmob]: 'borneo samarinda vs isenmulang kalteng'
+
+SPECIMENS (canonical keys):
+  'RC Strasbourg Alsace'       -> 'strasbourg'
+  'Strasbourg'                 -> 'strasbourg'
+  'Stade Brestois 29'          -> 'brest'
+  'Brest'                      -> 'brest'
+  'Lille OSC'                  -> 'lille'
+  'LOSC Lille'                 -> 'lille'
+  'Lille'                      -> 'lille'
+  'Lyonnais'                   -> 'lyon'
+  'Olympique Lyonnais'         -> 'lyon'
+  'Lyon'                       -> 'lyon'
+  'RC Celta'                   -> 'celta vigo'
+  'Celta'                      -> 'celta vigo'
+  'Celta Vigo'                 -> 'celta vigo'
+  'Real Betis Balompie'        -> 'real betis'
+  'Real Betis'                 -> 'real betis'
+  'AS Monaco'                  -> 'monaco'
+  'Monaco'                     -> 'monaco'
+  'AJ Auxerre'                 -> 'auxerre'
+  'Auxerre'                    -> 'auxerre'
+  'Inter Milan'                -> 'inter'
+  'Internazionale'             -> 'inter'
+  'Inter'                      -> 'inter'
+
+SPECIMEN GROUPS (playlist groupKey pairs):
+  Lille OSC vs Lyonnais  -> group 'lille vs lyon'
+  LOSC Lille vs Lyon  -> group 'lille vs lyon'
+  RC Strasbourg Alsace vs Stade Brestois 29  -> group 'brest vs strasbourg'
+  Real Madrid vs Celta  -> group 'celta vigo vs real madrid'
+  Real Madrid vs RC Celta  -> group 'celta vigo vs real madrid'
+  Real Madrid vs Celta Vigo  -> group 'celta vigo vs real madrid'

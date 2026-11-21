@@ -444,11 +444,15 @@ struct TVContentView: View {
     }
 
     /// The 3-across tile width from the measured content width
-    /// (KH-6): min(592, (W − 2×8 rail insets − 2×28 spacing)/3).
+    /// (KH-6): min(592, (W − 2×4 rail insets − 2×28 spacing)/3).
     /// Before the first measurement lands, the approved 592.
+    /// 1.5.1 (FL-360): the rail insets shrank 8 → 4 with the
+    /// margin reclaim, so the constant is 64, and W itself is
+    /// now the full safe-area width (the root's own 32 pt side
+    /// padding is gone — see the body note below).
     private var tileWidth: CGFloat {
         guard contentWidth > 0 else { return 592 }
-        return min(592, max(300, (contentWidth - 72) / 3))
+        return min(592, max(300, (contentWidth - 64) / 3))
     }
 
     var body: some View {
@@ -462,8 +466,8 @@ struct TVContentView: View {
                     .onAppear { contentWidth = geo.size.width }
                     .onChange(of: geo.size.width) { _, w in contentWidth = w }
             }
-            .padding(.horizontal, 32)
-            VStack(spacing: 20) {
+            .padding(.horizontal, 0)
+            VStack(spacing: 12) {
                 header
                 tabBar
                 // 1.4.9 (FL-360, audit S-1): the status line's
@@ -481,13 +485,20 @@ struct TVContentView: View {
                     .frame(height: 24)
                 scrollBody
             }
-            // Fit fix (2026-11-19, with Sony 2.20): side padding
-            // 60 -> 32pt so a rail row of three live boards fits
-            // entirely on the 1920pt screen — see TVLiveBoardView's
-            // width note in TVMatchViews.swift.
-            .padding(.horizontal, 32)
-            .padding(.top, 40)
-            .padding(.bottom, 28)
+            // 1.5.1 (FL-360, owner ruling 2026-11-21 15:36 CST:
+            // "Hiện đóng khung nhỏ hơn nên thiếu diện tích các
+            // khung" — the framing is inset too tightly and every
+            // frame starves): the root's own padding is GONE on
+            // all four sides. tvOS already insets primary content
+            // by its safe area (60 top/bottom, 80 sides — Apple
+            // HIG), and every point this stack added on top of it
+            // was wasted area: the 1.5.0 count never included the
+            // safe area at all, which is why its "fits" sheet
+            // clipped on the real screen. The full count sheet
+            // is in BUILD-151-REPORT.md.
+            .padding(.horizontal, 0)
+            .padding(.top, 0)
+            .padding(.bottom, 0)
         }
         .environment(\.tvTileWidth, tileWidth)
         .task {
@@ -706,7 +717,8 @@ struct TVContentView: View {
                 .font(.system(size: 20))
                 .foregroundStyle(TVPalette.leagueTx)
         }
-        .padding(.bottom, 4)
+        // 1.5.1 (FL-360): the 4 pt bottom pad is reclaimed —
+        // the root VStack spacing separates the rows now.
     }
 
     private var countText: String {
@@ -746,7 +758,7 @@ struct TVContentView: View {
         // row one because every pill in the bar now shares the
         // same SMALL uniform metrics (see tabPill): the bar is
         // compact and does not grow — it shrinks.
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 if !enChannels.isEmpty || nuvio.hasContent {
                     tabPill(title: "ENG", value: Self.enTabValue)
@@ -957,10 +969,18 @@ struct TVContentView: View {
             // (1.4.9: viewport 193, the tile cut at ≈136 of
             // 342 — the owner's "bị cắt" clip). The same 18
             // spacing applies to the cup and EN bodies below.
-            VStack(alignment: .leading, spacing: 18) {
+            // 1.5.1 (FL-360): that sheet was WRONG on the real
+            // screen — it never counted the tvOS safe area
+            // (120 pt) and dropped the rail's bottom inset; the
+            // true 1.5.0 viewport was 283 against a 410 need.
+            // The 1.5.1 reclaim (root padding gone, spacings
+            // tightened, rail insets 14 → 4, hero padding
+            // 18 → 10) gives viewport ≈419 against a 390 need.
+            // Full count sheet: BUILD-151-REPORT.md.
+            VStack(alignment: .leading, spacing: 12) {
                 heroPanel
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 30) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if !featuredEntries.isEmpty {
                             featuredRail(featuredEntries)
                         }
@@ -1008,18 +1028,26 @@ struct TVContentView: View {
                                       live: [TVFixtureEntry],
                                       upcoming: [TVFixtureEntry],
                                       rest: [TVFixtureEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 30) {
-            Text(competition.label)
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(Color(red: 0.812, green: 0.878, blue: 0.961))
+        // 1.5.1 (FL-360): the division label folds into the
+        // FIRST rail's title (see railSection(sectionLabel:)) —
+        // the separate 26 pt header row is reclaimed.
+        VStack(alignment: .leading, spacing: 12) {
             if !live.isEmpty {
-                railSection("🔴  ĐANG ĐÁ", live)
+                railSection("🔴  ĐANG ĐÁ", live, sectionLabel: competition.label)
             }
             if !upcoming.isEmpty {
-                railSection("⏰  SẮP ĐÁ", upcoming)
+                if live.isEmpty {
+                    railSection("⏰  SẮP ĐÁ", upcoming, sectionLabel: competition.label)
+                } else {
+                    railSection("⏰  SẮP ĐÁ", upcoming)
+                }
             }
             if !rest.isEmpty {
-                railSection("📺  KHÁC", rest)
+                if live.isEmpty && upcoming.isEmpty {
+                    railSection("📺  KHÁC", rest, sectionLabel: competition.label)
+                } else {
+                    railSection("📺  KHÁC", rest)
+                }
             }
         }
     }
@@ -1031,10 +1059,10 @@ struct TVContentView: View {
     @ViewBuilder
     private var cupBody: some View {
         let now = Date()
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             heroPanel
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 30) {
+                VStack(alignment: .leading, spacing: 12) {
                     cupSection(.championsLeague,
                                fixtures: entries.filter {
                                    $0.competition == .championsLeague
@@ -1072,19 +1100,27 @@ struct TVContentView: View {
                 return b == 1 || b == 2
             }
             let rest = fixtures.filter { store.effectiveBucket(of: $0.channel, now: now) == 3 }
-            VStack(alignment: .leading, spacing: 30) {
-                Text(competition.label)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(competition == .championsLeague
-                        ? TVPalette.c1Head : .white)
+            // 1.5.1 (FL-360): the competition label folds into
+            // the first rail's title (the Nuvio rail's title
+            // already carries it); the stacked title row is
+            // reclaimed so the first cup rail stands whole.
+            VStack(alignment: .leading, spacing: 12) {
                 if !live.isEmpty {
-                    railSection("🔴  ĐANG ĐÁ", live)
+                    railSection("🔴  ĐANG ĐÁ", live, sectionLabel: competition.label)
                 }
                 if !upcoming.isEmpty {
-                    railSection("⏰  SẮP ĐÁ", upcoming)
+                    if live.isEmpty {
+                        railSection("⏰  SẮP ĐÁ", upcoming, sectionLabel: competition.label)
+                    } else {
+                        railSection("⏰  SẮP ĐÁ", upcoming)
+                    }
                 }
                 if !rest.isEmpty {
-                    railSection("📺  KHÁC", rest)
+                    if live.isEmpty && upcoming.isEmpty {
+                        railSection("📺  KHÁC", rest, sectionLabel: competition.label)
+                    } else {
+                        railSection("📺  KHÁC", rest)
+                    }
                 }
                 if !addon.isEmpty {
                     nuvioEventRail("📺  NUVIO · " + competition.label, addon)
@@ -1140,10 +1176,10 @@ struct TVContentView: View {
             }
             Spacer()
         } else {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
                 heroPanel
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 30) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if !nuvio.liveEvents.isEmpty {
                             nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", nuvio.liveEvents)
                         }
@@ -1458,11 +1494,12 @@ struct TVContentView: View {
                    alignment: .topLeading)
             heroArtView(model.art)
         }
-        .padding(.horizontal, 40)
-        // 1.5.0: vertical padding 28 → 18 — part of the
-        // slim hero's budget (panel 366, not 386); the
-        // horizontal padding is unchanged.
-        .padding(.vertical, 18)
+        .padding(.horizontal, 24)
+        // 1.5.1 (FL-360): vertical padding 18 → 10 and
+        // horizontal 40 → 24 — the hero's own margins are
+        // part of the reclaim; the content column (330) and
+        // the art are untouched, so the panel is 350.
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
         .background(tvHeroBackground(focused: focusedKey == model.focusKey))
     }
@@ -1556,6 +1593,19 @@ struct TVContentView: View {
 
     private func railSection(_ title: String, _ items: [TVFixtureEntry]) -> some View {
         TVFixtureRail(title: title, entries: items, style: .standard,
+                      onSelect: { play($0) }, onFocusKey: heroFocus)
+    }
+
+    /// 1.5.1 (FL-360): a section label (cup competition,
+    /// division) folded INTO the first rail's title — the
+    /// stacked two-title arrangement (section title + rail
+    /// title, ≈86 pt) starved the first rail of exactly the
+    /// points the reclaim won back. Every word is preserved;
+    /// the label simply rides the rail title row.
+    private func railSection(_ title: String, _ items: [TVFixtureEntry],
+                             sectionLabel: String) -> some View {
+        TVFixtureRail(title: sectionLabel + " · " + title, entries: items,
+                      style: .standard,
                       onSelect: { play($0) }, onFocusKey: heroFocus)
     }
 

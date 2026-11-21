@@ -1190,14 +1190,15 @@ struct TVFixtureRail: View {
                         .frame(height: slotHeight, alignment: .top)
                     }
                 }
-                .padding(.horizontal, 8)
-                // 1.5.0: vertical inset 16 → 14 — part of
-                // the slim hero's budget (see the scrollBody
-                // note in TVContentView): the rail's tiles
-                // stand fully inside the resting viewport.
-                // The ring is strokeBorder (inside the tile
-                // frame), so 14 still clears it whole.
-                .padding(.vertical, 14)
+                .padding(.horizontal, 4)
+                // 1.5.1 (FL-360): vertical inset 14 → 4. The
+                // focus ring is strokeBorder INSIDE the tile
+                // frame and the card button style applies no
+                // focus scaling (TVCardButtonStyle), so the
+                // inset is pure breathing room — 4 pt clears
+                // the ring whole and returns 20 pt to the
+                // viewport (see BUILD-151-REPORT.md).
+                .padding(.vertical, 4)
             }
         }
         .onChange(of: focus) { _, key in

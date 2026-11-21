@@ -450,6 +450,74 @@ enum TeamNameNorm {
         "deportivo": "deportivo a coruna",
         "alaves": "deportivo alaves",
         "deportivo la coruna": "deportivo a coruna",
+        // 1.5.1 (FL-361) — the systematic harvest the owner
+        // ordered after the family-by-family patches kept
+        // missing: every entry below was extracted from ONE
+        // live pull (2026-11-21, harness-151) where the
+        // playlist's full legal name and the feed name (ESPN
+        // and/or FotMob) denote the same club in the same
+        // fixture at the same kickoff instant, the other side
+        // anchored. The specimen families first (the owner's
+        // own photographs), then the rest of the day's harvest
+        // in the same shape. Each target stem has exactly one
+        // producer club in the corpus (the aarhus test).
+        // - Strasbourg/Brest/Lille/Lyon: ESPN and FotMob BOTH
+        //   write the short city names ("Strasbourg", "Brest",
+        //   "Lille", "Lyon" — ESPN fra.1 events "Brest at
+        //   Strasbourg", "Lyon at Lille", 2026-11-21T19:45Z;
+        //   FotMob Ligue 1 identical); the playlist writes the
+        //   legal names. "lyon duchere" keeps its own stem, so
+        //   bare "lyon" is Lyon alone.
+        "rc strasbourg alsace": "strasbourg",
+        "stade brestois": "brest",
+        "lille osc": "lille",
+        "losc lille": "lille",
+        "lyonnais": "lyon",
+        "olympique lyonnais": "lyon",
+        // - Celta: feeds write "Celta Vigo"; the playlist also
+        //   writes "RC Celta" and bare "Celta" (the owner's
+        //   Real Madrid photograph: the scoreless twin was the
+        //   "Real Madrid vs Celta" listing).
+        "rc celta": "celta vigo",
+        "celta": "celta vigo",
+        // - Lens: feeds write "Lens"; playlist "RC Lens".
+        "rc lens": "lens",
+        // - Inter: the three writings converge on "inter" —
+        //   playlist "Inter Milan", ESPN "Internazionale",
+        //   FotMob "Inter". No other club reduces to the bare
+        //   stem (Inter Miami / Inter Turku keep theirs).
+        "inter milan": "inter",
+        "internazionale": "inter",
+        // - The rest of the 2026-11-21 harvest (same-fixture,
+        //   same-instant, other side anchored; feed writing in
+        //   parentheses):
+        "tigres uanl": "tigres",                    // FotMob "Tigres"
+        "angers sco": "angers",                     // ESPN "Angers"
+        "apia leichhardt tigers": "apia leichhardt", // FotMob
+        "asan mugunghwa": "chungnam asan",          // FotMob (club renamed)
+        "atletico mineiro": "atletico mg",          // FotMob "Atlético MG"
+        "atletico mineiro mg": "atletico mg",       // FotMob "Atlético MG"
+        "fsv mainz": "mainz",                       // ESPN "Mainz 05"
+        "bahia ba": "bahia",                        // ESPN "Bahia"
+        "cruzeiro mg": "cruzeiro",                  // ESPN "Cruzeiro"
+        "besiktas jk": "besiktas",                  // FotMob "Besiktas"
+        "borneo": "borneo samarinda",               // FotMob "Borneo Samarinda"
+        "pusamania borneo": "borneo samarinda",     // FotMob "Borneo Samarinda"
+        "brighton": "brighton hove albion",         // ESPN/FotMob full name
+        "cong an ho chi minh": "cong an ho chi minh city", // FotMob
+        "tp ho chi minh": "cong an ho chi minh city",      // FotMob (club renamed)
+        "gimhae city": "gimhae",                    // FotMob "Gimhae"
+        "guizhou guiyang athletic": "guizhou zhucheng athletic", // FotMob
+        "jeju united": "jeju",                      // FotMob "Jeju"
+        "sv werder bremen": "werder bremen",        // FotMob "Werder Bremen"
+        "kuala lumpur fa": "kuala lumpur city",     // FotMob (club renamed)
+        "u n a m pumas": "pumas",                   // FotMob "Pumas"
+        "shb nang": "nang",                         // FotMob "Đà Nẵng" ("da" is a filler token)
+        "sporting braga": "braga",                  // FotMob "Braga"
+        "ud las palmas": "las palmas",              // ESPN "Las Palmas"
+        "ural yekaterinburg": "ural",               // FotMob "Ural"
+        "twente enschede": "twente",               // FotMob "Twente"
+        "fluminese": "fluminense",                  // ESPN "Fluminense" (playlist typo)
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,

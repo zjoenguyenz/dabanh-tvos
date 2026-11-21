@@ -225,7 +225,19 @@ final class MatchStateStore: ObservableObject {
     private var fixturesProvider: (() -> [Channel])?
     private var pollTask: Task<Void, Never>?
     private var fetching = false
-    private var fotmobDetailCache: [Int: [MatchEvent]] = [:]
+    /// 1.5.1 (FL-370): the cache entry carries its fetch time
+    /// and whether the match was ALREADY FINISHED when the
+    /// answer was fetched — before 1.5.1 a non-empty answer
+    /// was applied forever, so a LIVE match's events froze at
+    /// the minute of the first detail fetch and later
+    /// goals/cards never landed. A live answer is now a
+    /// snapshot with a 120 s life (two poll cycles); only an
+    /// answer fetched while the match was finished is final.
+    /// (The flag must be recorded at fetch time: judging
+    /// finality from the state's CURRENT status would promote
+    /// a live snapshot to "final" the moment the match ends,
+    /// losing its last events — review round 1.)
+    private var fotmobDetailCache: [Int: (events: [MatchEvent], fetchedAt: Date, final: Bool)] = [:]
     /// The pair key of the fixture the hero panel is showing
     /// (1.4.8): the view layer registers it, the cycle's detail
     /// pass serves that pair first. The hero is the most
@@ -275,21 +287,28 @@ final class MatchStateStore: ObservableObject {
     /// fresher cycle state (or an ESPN state that has since won
     /// the key) is never clobbered.
     func requestBoardDetail(for state: MatchState) {
-        guard state.source == .fotmob, state.events.isEmpty,
+        guard state.source == .fotmob,
               let fid = state.fotmobID,
               !boardDetailInFlight.contains(fid) else { return }
-        // A cached EMPTY result is a finished match's final
-        // "no events" answer (1.4.8: empty answers for live
-        // matches are never stored — "no events yet" is not
-        // final while goals can still come): applying it again
-        // could only rewrite an equal state and write another
-        // log line, so it is not re-applied. A cached non-empty
-        // result applies at once (applyBoardDetail's own
-        // guards make a repeat a no-op).
+        // Cache discipline (1.4.8, extended 1.5.1/FL-370): a
+        // cached answer is applied at once while it is FRESH —
+        // a finished match's answer is final forever; a live
+        // match's answer is a snapshot that expires after
+        // 120 s, after which the board's fixture earns a
+        // refetch (its event list can only have grown). With
+        // no cache entry, only an event-less state fetches —
+        // a non-empty FotMob state always has a cache entry
+        // behind it (both write paths store non-empty answers).
         if let cached = fotmobDetailCache[fid] {
-            if !cached.isEmpty {
-                applyBoardDetail(cached, fid: fid, key: state.storageKey)
+            let fresh = cached.final
+                || Date().timeIntervalSince(cached.fetchedAt) < 120
+            if fresh {
+                if !cached.events.isEmpty {
+                    applyBoardDetail(cached.events, fid: fid, key: state.storageKey)
+                }
+                return
             }
+        } else if !state.events.isEmpty {
             return
         }
         boardDetailInFlight.insert(fid)
@@ -302,9 +321,19 @@ final class MatchStateStore: ObservableObject {
                 // pass: an empty answer is stored only when
                 // the stored state says the match is finished
                 // (a final answer); a live match's empty
-                // answer is applied but never stored.
-                if !events.isEmpty || states[key]?.status == .ft {
-                    fotmobDetailCache[fid] = events
+                // answer is applied but never stored. And the
+                // 1.5.1 richer-wins discipline (review round 1):
+                // the fetched list is stored ONLY when it is
+                // at least as rich as the cached prior — an
+                // unguarded store let a shorter refetch poison
+                // the cache, after which the cycle pass applied
+                // the shorter list to the rebuilt day state and
+                // the fixture's events SHRANK.
+                let prior = fotmobDetailCache[fid]?.events ?? []
+                if events.count >= prior.count,
+                   !events.isEmpty || states[key]?.status == .ft {
+                    fotmobDetailCache[fid] = (events: events, fetchedAt: Date(),
+                                               final: states[key]?.status == .ft)
                 }
                 applyBoardDetail(events, fid: fid, key: key)
             }
@@ -334,8 +363,15 @@ final class MatchStateStore: ObservableObject {
     }
 
     private func applyBoardDetail(_ events: [MatchEvent], fid: Int, key: String) {
+        // 1.5.1 (FL-370): the write-back used to require the
+        // stored list to be EMPTY, so a detail fetched early in
+        // a live match capped the fixture's events for good.
+        // It now accepts any STRICTLY RICHER list for the same
+        // FotMob state — never a shorter one (a refetch can
+        // only complete the picture, never shrink it).
         guard let current = states[key], current.source == .fotmob,
-              current.fotmobID == fid, current.events.isEmpty else { return }
+              current.fotmobID == fid,
+              events.count > current.events.count else { return }
         states[key] = current.withEvents(events)
         onChange?()
         DiagLog.write("board", "fotmob detail id=\(fid) events=\(events.count)")
@@ -493,8 +529,30 @@ final class MatchStateStore: ObservableObject {
         if minuteText == nil {
             minuteText = donors.first(where: { $0.minuteText != nil })?.minuteText
         }
-        if events.isEmpty,
-           let donor = donors.first(where: { !$0.events.isEmpty }) {
+        // 1.5.1 (FL-370): the events fill was all-or-nothing —
+        // a winner holding a PARTIAL event list (one goal of
+        // two, no cards) blocked every donor's fuller list for
+        // the whole match, which is the owner's Monaco board
+        // (score 1-1, only the 82' goal shown, the 29' goal
+        // and the cards missing though both event sources
+        // carried them). The fill is now richest-wins: a donor
+        // whose list is LONGER than the current one replaces
+        // it, but only when the donor's scoreline equals the
+        // merged score exactly — events describing a different
+        // score are never mixed in (fail closed, the same
+        // discipline as the score fill above). The RICHEST
+        // qualifying donor wins (review round 1: first-by-rank
+        // let a stronger layer's shorter list shadow a fuller
+        // one — goals shown, cards still missing); ties break
+        // to the strongest layer, as donors are rank-sorted
+        // and max(by:) keeps the first maximum.
+        if let donor = donors
+            .filter({
+                $0.events.count > events.count
+                    && $0.scoreHome != nil && $0.scoreHome == scoreHome
+                    && $0.scoreAway != nil && $0.scoreAway == scoreAway
+            })
+            .max(by: { $0.events.count < $1.events.count }) {
             events = donor.events
         }
         if competition == nil {
@@ -614,8 +672,21 @@ final class MatchStateStore: ObservableObject {
             }
         for key in detailCandidates {
             guard let state = merged[key], let fid = state.fotmobID else { continue }
-            if let events = fotmobDetailCache[fid] {
-                merged[key] = state.withEvents(events)
+            // 1.5.1 (FL-370): a cached answer applies while it
+            // is FRESH — final for a finished match, a 120 s
+            // snapshot for a live one. The pre-1.5.1 code
+            // applied a non-empty cache entry forever, freezing
+            // a live match's scorers/cards at the first fetch's
+            // minute. An expired snapshot still beats no events
+            // when the fetch budget is spent or a fetch fails,
+            // and a refetch can only grow the list (richer
+            // wins), never shrink it.
+            let cached = fotmobDetailCache[fid]
+            let cacheFresh = cached != nil
+                && (cached!.final
+                    || now.timeIntervalSince(cached!.fetchedAt) < 120)
+            if let cached, cacheFresh {
+                merged[key] = state.withEvents(cached.events)
             } else if detailBudget > 0 {
                 detailBudget -= 1
                 if let events = await Self.fetchFotMobDetail(id: fid) {
@@ -632,11 +703,28 @@ final class MatchStateStore: ObservableObject {
                     // are applied for this cycle (a no-op) but
                     // never stored, so the fixture stays
                     // fetch-eligible under the same cap.
-                    if !events.isEmpty || state.status == .ft {
-                        fotmobDetailCache[fid] = events
+                    // The richer-wins comparison reads the
+                    // cache AFTER the fetch suspends, never
+                    // the pre-fetch snapshot (review round 1:
+                    // a board/hero fetch for the same fixture
+                    // can land while this fetch is in flight —
+                    // the two paths share no in-flight guard —
+                    // and guarding against the stale snapshot
+                    // let the slower, shorter answer overwrite
+                    // the richer cache and shrink the fixture).
+                    let prior = fotmobDetailCache[fid]?.events ?? []
+                    let applied = events.count >= prior.count ? events : prior
+                    if applied.count == events.count,
+                       !events.isEmpty || state.status == .ft {
+                        fotmobDetailCache[fid] = (events: events, fetchedAt: now,
+                                                   final: state.status == .ft)
                     }
-                    merged[key] = state.withEvents(events)
+                    merged[key] = state.withEvents(applied)
+                } else if let cached {
+                    merged[key] = state.withEvents(cached.events)
                 }
+            } else if let cached {
+                merged[key] = state.withEvents(cached.events)
             }
         }
         // Staleness guard (KH-3, ĐG-7): a frozen winning layer
@@ -648,6 +736,25 @@ final class MatchStateStore: ObservableObject {
         var next = merged
         for (key, old) in states where next[key] == nil && isFresh(old, now: now) {
             next[key] = old
+        }
+        // 1.5.1 (FL-370, review round 1): never let this
+        // assignment shrink a FotMob state's events below what
+        // the store already holds. A board/hero detail fetch
+        // writes into `states` directly (applyBoardDetail) and
+        // can land WHILE this cycle is suspended on a later
+        // candidate's fetch — after the fixture's own merged
+        // snapshot was taken. Without this reconcile, the
+        // wholesale assignment rolled the enriched state back
+        // to the snapshot's shorter list. The guard is scoped
+        // to the same fixture's FotMob state (same fotmobID):
+        // layer precedence itself is untouched.
+        for (key, old) in states {
+            guard let incoming = next[key],
+                  old.source == .fotmob, incoming.source == .fotmob,
+                  old.fotmobID != nil, old.fotmobID == incoming.fotmobID,
+                  old.events.count > incoming.events.count
+            else { continue }
+            next[key] = incoming.withEvents(old.events)
         }
         if next != states {
             states = next

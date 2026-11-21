@@ -539,7 +539,12 @@ struct TVMatchBoardView: View {
             // its on-demand FotMob detail fetch — the store
             // guards (FotMob state, events still empty) and
             // no-ops for every other state.
-            if let state = entry.state {
+            // 1.5.1 (FL-370): the LIVE state is passed, not the
+            // tap-time snapshot — and the store's guard now
+            // also refetches a live match whose cached detail
+            // snapshot has expired, so an open board's event
+            // list can keep growing past its first fetch.
+            if let state = liveEntry.state {
                 store.requestBoardDetail(for: state)
             }
         }
@@ -559,6 +564,43 @@ struct TVMatchBoardView: View {
 
     // MARK: Header (the full cluster, §2.4 as amended 2026-11-21)
 
+    /// 1.5.1 (FL-370): the board's entry is a value snapshot
+    /// taken when the fixture was tapped — before this fix the
+    /// header read that frozen copy forever, so a detail
+    /// upgrade landing in the store while the board stood open
+    /// (more scorers, the cards) never reached the screen the
+    /// owner was looking at. The header now resolves the
+    /// fixture's CURRENT bound state from the store on every
+    /// render (PlaylistStore republishes on state changes, so
+    /// the board tracks the match live), falling back to the
+    /// snapshot when the store has nothing bound.
+    private var liveEntry: TVFixtureEntry {
+        var e = entry
+        if let s = store.matchState(for: entry.channel) {
+            e.state = s
+        }
+        return e
+    }
+
+    /// The crest pair row (1.5.1, FL-370): the board header
+    /// carried NO crest slots at all before this fix — the
+    /// tiles and the hero render displayCrests, the board
+    /// never did, which is half of the owner's "mất logo"
+    /// verdict. Fixed 92 pt slots, home left / away right —
+    /// the same x positions in every state, so a state change
+    /// never moves them.
+    @ViewBuilder
+    private var crestRow: some View {
+        if let crests = liveEntry.displayCrests {
+            HStack(alignment: .center) {
+                TVCrestImage(url: crests.0, size: 92)
+                Spacer(minLength: 0)
+                TVCrestImage(url: crests.1, size: 92)
+            }
+            .frame(height: 92)
+        }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 14) {
@@ -568,14 +610,14 @@ struct TVMatchBoardView: View {
                     .foregroundStyle(TVPalette.leagueTx)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                if let badge = entry.badgeText {
+                if let badge = liveEntry.badgeText {
                     Text(badge)
                         .font(.system(size: 25, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 4)
                         .background(RoundedRectangle(cornerRadius: 8)
-                            .fill(entry.state?.status == .ht
+                            .fill(liveEntry.state?.status == .ht
                                 ? TVPalette.htAmber : TVPalette.minuteRed))
                 }
             }
@@ -612,10 +654,27 @@ struct TVMatchBoardView: View {
             // summary this header showed before: inside the
             // board is where the full info belongs ("vào
             // trong thì hiện đủ thông tin").
-            if let state = entry.state,
+            if let state = liveEntry.state,
                let home = state.scoreHome, let away = state.scoreAway {
                 VStack(alignment: .leading, spacing: 12) {
-                    TVScoreDigits(home: home, away: away)
+                    // 1.5.1 (FL-370): the crests flank the
+                    // digits — home crest, score, away crest,
+                    // the board family's own crest-vs-crest
+                    // idiom (TVLiveBoardView). The digits keep
+                    // their centred place; the crest slots are
+                    // a fixed 92 pt, inside the reservations
+                    // below, so their presence moves nothing.
+                    HStack(alignment: .center, spacing: 28) {
+                        if let crests = liveEntry.displayCrests {
+                            TVCrestImage(url: crests.0, size: 92)
+                        }
+                        Spacer(minLength: 0)
+                        TVScoreDigits(home: home, away: away)
+                        Spacer(minLength: 0)
+                        if let crests = liveEntry.displayCrests {
+                            TVCrestImage(url: crests.1, size: 92)
+                        }
+                    }
                     if !state.events.isEmpty {
                         TVEventColumns(state: state)
                     } else if state.status == .live || state.status == .ht {
@@ -633,13 +692,23 @@ struct TVMatchBoardView: View {
                             .frame(height: 121)
                     }
                 }
-            } else if entry.state?.status == .live || entry.state?.status == .ht {
+            } else if liveEntry.state?.status == .live || liveEntry.state?.status == .ht {
                 // A live board whose SCORE has not landed
                 // either: reserve the whole block (digits 86
                 // + spacing 12 + event area 121 = 219), so
-                // its arrival moves nothing below.
-                Color.clear
-                    .frame(height: 219)
+                // its arrival moves nothing below. The crest
+                // row (92) rides inside the reservation, the
+                // clear remainder is 219 − 92 − 12 = 115.
+                VStack(alignment: .leading, spacing: 12) {
+                    crestRow
+                    Color.clear
+                        .frame(height: 115)
+                }
+            } else {
+                // No score block (a pre-match board, or no
+                // state bound yet): the crest row stands alone
+                // so the fixture's badges still show.
+                crestRow
             }
         }
     }
