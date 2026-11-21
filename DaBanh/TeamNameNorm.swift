@@ -246,6 +246,19 @@ enum TeamNameNorm {
         "ath bilbao": "athletic",
         "rcd espanyol": "espanyol",
         "rcd espanyol barcelona": "espanyol",
+        // FL-361 (2026-11-21) — measured on the owner's 1.4.8
+        // device clip: a playlist listing writes the club's
+        // full official name "Real Betis Balompié" beside the
+        // feeds' "Real Betis" on the Sevilla fixture — the
+        // bare duplicate's hero headline reads "…vs Real Betis
+        // Balompié" (meta "· 2 nguồn phát") while the bound
+        // entry carries 0–1 + scorers. "balompie" is neither a
+        // filler token nor an alias, so both keys stranded the
+        // long spelling in its own group with no state. The
+        // aarhus test passes: Balompié belongs to this one
+        // club's official name; no distinct club is measured
+        // under the "real betis" stem.
+        "real betis balompie": "real betis",
         // Near-miss sweep dispositions (2026-11-20, FIX-127C) —
         // each measured on ONE fixture (same opponent + same
         // date) in the corpus; bare-stem entries passed the

@@ -1021,7 +1021,12 @@ struct NuvioEventCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
+                // 1.4.9 (FL-360, audit S-7): the crest row
+                // holds the crest height (62) in both
+                // branches — the channel-logo branch was 54,
+                // 8 pt shorter than the crest branch.
                 crestRow
+                    .frame(height: 62)
                 Spacer()
                 statusChip
             }

@@ -217,6 +217,49 @@ struct TVContentView: View {
                 LeagueClassifier.leagueRank(of: $0.headline) == league.rawValue
             }
         }
+        // 1.4.9 (FL-361): a Nuvio event that belongs to a board
+        // fixture is NOT a second board entry — it is that
+        // fixture's English source, reachable from the
+        // fixture's own link board (the play(_:) attach reads
+        // the addon store directly and is unaffected by this
+        // filter). In 1.4.8 the fold-league and cups slices
+        // rendered such events in their own NUVIO rails beside
+        // the playlist entry: the same fixture twice on one
+        // board, the addon copy bare by construction (its hero
+        // carries no score block). Belonging is the attach
+        // rule's core: canonical pair equal + same ICT stamp
+        // date + kickoffs within 3 h. An event matching no
+        // board entry keeps its rail exactly as before, and
+        // every event stays in the BLV Anh tab regardless —
+        // the tab renders the store's lists, not these slices.
+        let boardFixtures: [(pair: String, dateKey: String, kickoff: Date, marked: Bool)] =
+            s.allEntries.compactMap { e in
+                guard let t = e.teams, let k = e.channel.kickoff,
+                      let p = MatchPairKey.key(home: t.0, away: t.1) else { return nil }
+                return (pair: p, dateKey: FixtureGrouping.stampDateKey(of: k), kickoff: k,
+                        marked: isWomenMarked(t.0) || isWomenMarked(t.1))
+            }
+        func nuvioDuplicatesBoard(_ item: NuvioItem) -> Bool {
+            guard let t = item.teams, let ek = item.kickoff,
+                  let p = MatchPairKey.key(home: t.0, away: t.1) else { return false }
+            let dk = FixtureGrouping.stampDateKey(of: ek)
+            // Marker rule (the attach guard's asymmetry,
+            // applied strictly): MatchPairKey canonicalises
+            // women's markers away, so pair equality alone
+            // would let a women's event "duplicate" a men's
+            // board entry of the same clubs. Suppression
+            // requires the marker status to MATCH; a
+            // cross-marker event keeps its rail, and the
+            // play-time attach guard decides its folding.
+            let itemMarked = isWomenMarked(t.0) || isWomenMarked(t.1)
+            return boardFixtures.contains {
+                $0.pair == p && $0.dateKey == dk && $0.marked == itemMarked
+                    && abs(ek.timeIntervalSince($0.kickoff)) <= 3 * 3600
+            }
+        }
+        s.nuvioCupEvents.removeAll(where: nuvioDuplicatesBoard)
+        s.leagueLiveEvents.removeAll(where: nuvioDuplicatesBoard)
+        s.leagueUpcomingEvents.removeAll(where: nuvioDuplicatesBoard)
         s.hasLeagueAddon = !s.leagueAddonChannels.isEmpty
             || !s.leagueLiveEvents.isEmpty || !s.leagueUpcomingEvents.isEmpty
         // Focus key → hero content, for every focusable card.
@@ -426,11 +469,19 @@ struct TVContentView: View {
             VStack(spacing: 20) {
                 header
                 tabBar
-                if let message = store.statusMessage {
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                }
+                // 1.4.9 (FL-360, audit S-1): the status line's
+                // slot is ALWAYS in the root VStack at a fixed
+                // height — a message arriving (mirror slow,
+                // fallback, link-check result) or clearing
+                // changes only the text, never the layout. In
+                // 1.4.8 the row inserted/removed ≈44 pt and the
+                // hero plus every rail shifted with it, exactly
+                // while the owner watched the screen settle.
+                Text(store.statusMessage ?? "")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .frame(height: 24)
                 scrollBody
             }
             // Fit fix (2026-11-19, with Sony 2.20): side padding
@@ -1034,6 +1085,14 @@ struct TVContentView: View {
 
     private var footerRow: some View {
         HStack {
+            // Standing credit: football-logos.cc supplies part
+            // of the shared crest set. The footer is this app's
+            // only persistent about surface — DaBanhTV has no
+            // Settings screen — so the credit lives here,
+            // beside the version label.
+            Text("Logos: football-logos.cc")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.4))
             Spacer()
             // 1.4.8 (FL-331 round): version label read from the bundle, never
             // a hardcoded literal — a stale literal made screenshots
@@ -1165,46 +1224,212 @@ struct TVContentView: View {
     /// height or content swap.
     private static let heroColumnHeight: CGFloat = 516
 
+    /// 1.4.9 (FL-360): the hero's INTERNAL slots — the 1.4.8
+    /// pin held the panel but not its contents: the score
+    /// block's presence moved "Xem ngay" ≈219 pt and a 1-line
+    /// vs 2-line headline moved everything below it ≈57 pt,
+    /// INSIDE the fixed panel, on every focus move between
+    /// unlike fixtures and when events landed on a poll. Each
+    /// region of the column now holds its fullest height in
+    /// EVERY state (badge 40, headline 114 = 2 lines, meta 30,
+    /// score slot 217 = digits 86 + spacings 24 + divider 1 +
+    /// event area 106): content fills its slot or the slot
+    /// stays empty — nothing resizes, nothing rides. Column
+    /// total: 40 + 114 + 30 + 217 + 54 + 4×14 spacing = 511
+    /// ≤ 516 (the 1.4.8 slack absorbs the rounding).
+    private static let heroBadgeSlotHeight: CGFloat = 40
+    private static let heroHeadlineSlotHeight: CGFloat = 114
+    private static let heroMetaSlotHeight: CGFloat = 30
+    private static let heroScoreSlotHeight: CGFloat = 217
+
+    /// 1.4.9 (FL-360): the hero's content as DATA. In 1.4.8
+    /// three DIFFERENT view trees (fixtureHero / englishHero /
+    /// nuvioHero) rendered the three hero kinds, so a focus
+    /// move that changed the hero's KIND replaced the whole
+    /// tree — the owner's 1.4.8 clip shows the two heroes
+    /// drawn over each other mid-swap, text colliding, two
+    /// "Xem ngay" buttons stacked. Now every kind is reduced
+    /// to this one model and rendered by the ONE hero frame
+    /// below: a kind change is a value change inside an
+    /// unchanging structure, so SwiftUI updates the content
+    /// in place — there is no second tree to ghost with.
+    private struct HeroModel {
+        var badgeText: String
+        var badgeColor: Color
+        var headline: String
+        var meta: String
+        var scoreState: MatchState? = nil
+        var scoreHome: Int? = nil
+        var scoreAway: Int? = nil
+        var art: HeroArt
+        var focusKey: String
+
+        /// The no-hero shell (heroItem == nil while the tab
+        /// body renders): every slot empty, so the panel holds
+        /// its full 572 pt instead of collapsing to the 0 pt
+        /// EmptyView 1.4.8 rendered — the audit's S-5 case
+        /// (a folded league tab whose fixtures are empty but
+        /// whose addon rails exist).
+        static let empty = HeroModel(badgeText: "", badgeColor: TVPalette.tealFill,
+                                     headline: "", meta: "",
+                                     art: .soccer, focusKey: "")
+    }
+
+    /// The hero's art slot content: every variant renders
+    /// inside the SAME 440×168 box, so a crest pair, a channel
+    /// logo and a placeholder occupy identical geometry — in
+    /// 1.4.8 the variants carried different boxes and the art
+    /// drifted/clipped while a focused match's data loaded
+    /// (the owner's clip: crests + "VS" floating mid-panel,
+    /// the panel mostly empty).
+    private enum HeroArt {
+        case crests(URL?, URL?)
+        case logo(Channel)
+        case tvGlyph
+        case soccer
+    }
+
     @ViewBuilder
     private var heroPanel: some View {
         switch heroItem {
         case .fixture(let entry):
-            fixtureHero(entry)
+            heroPanelView(fixtureHeroModel(entry)) { play(entry) }
         case .english(let ch):
-            englishHero(ch)
+            heroPanelView(englishHeroModel(ch)) {
+                playRequest = PlayRequest(resolution: store.resolution(for: ch))
+            }
         case .nuvio(let item):
-            nuvioHero(item)
+            heroPanelView(nuvioHeroModel(item)) {
+                playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+            }
         case nil:
-            EmptyView()
+            heroPanelView(.empty, action: nil)
         }
     }
 
-    /// The hero for an addon item, in the englishHero layout:
-    /// a kind badge, the headline, the league/source meta,
-    /// crest-vs-crest art for events with teams (the addon's
-    /// own badges) or the channel art for 24/7 channels.
-    private func nuvioHero(_ item: NuvioItem) -> some View {
-        let heroFocused = focusedKey == "heroNV:" + item.id
-        return Button {
-            playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-        } label: {
-            HStack(alignment: .center, spacing: 36) {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(nuvioHeroBadge(item))
-                        .font(.system(size: 21, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(nuvioHeroBadgeColor(item)))
-                    Text(item.headline)
-                        .font(.system(size: 46, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Text(nuvioHeroMeta(item))
-                        .font(.system(size: 24))
-                        .foregroundStyle(TVPalette.heroMeta)
-                        .lineLimit(1)
+    private func fixtureHeroModel(_ entry: TVFixtureEntry) -> HeroModel {
+        let badge = heroBadgeInfo(bucket: store.effectiveBucket(of: entry.channel),
+                                  channel: entry.channel, state: entry.state)
+        // The 1.4.4 art rule, unchanged: the entry's
+        // displayCrests pair when either side resolved, else
+        // the channel logo, else the placeholder.
+        let art: HeroArt
+        let ch = entry.channel
+        if let pair = entry.displayCrests, pair.0 != nil || pair.1 != nil {
+            art = .crests(pair.0, pair.1)
+        } else if ch.logoURL != nil {
+            art = .logo(ch)
+        } else {
+            art = .soccer
+        }
+        var model = HeroModel(badgeText: badge.text, badgeColor: badge.color,
+                              headline: entry.headline, meta: heroMeta(entry),
+                              art: art, focusKey: "hero:" + entry.id)
+        if let state = entry.state,
+           let home = state.scoreHome, let away = state.scoreAway {
+            model.scoreState = state
+            model.scoreHome = home
+            model.scoreAway = away
+        }
+        return model
+    }
+
+    private func englishHeroModel(_ ch: Channel) -> HeroModel {
+        HeroModel(badgeText: "🌍 BLV TIẾNG ANH · KÊNH 24/7",
+                  badgeColor: TVPalette.tealFill,
+                  headline: TVEnglish.displayName(ch),
+                  meta: "Kênh tiếng Anh · phát liên tục · nguồn dự phòng khi nguồn Việt chậm hoặc chết",
+                  art: ch.logoURL != nil ? .logo(ch) : .tvGlyph,
+                  focusKey: "heroEN:" + ch.url)
+    }
+
+    private func nuvioHeroModel(_ item: NuvioItem) -> HeroModel {
+        // The addon's art rule, unchanged: crest-vs-crest for
+        // events with teams (the addon's own badges), the
+        // channel art for 24/7 channels, else the placeholder.
+        let art: HeroArt
+        if item.teams != nil {
+            art = .crests(item.team1Logo.flatMap(URL.init(string:)),
+                          item.team2Logo.flatMap(URL.init(string:)))
+        } else if !item.poster.isEmpty {
+            art = .logo(item.displayChannel)
+        } else {
+            art = .soccer
+        }
+        return HeroModel(badgeText: nuvioHeroBadge(item),
+                         badgeColor: nuvioHeroBadgeColor(item),
+                         headline: item.headline, meta: nuvioHeroMeta(item),
+                         art: art, focusKey: "heroNV:" + item.id)
+    }
+
+    /// THE hero frame (1.4.9) — the only hero view tree in
+    /// the app. With an action it is the focusable hero
+    /// button; without one (the nil shell) it is the same
+    /// frame, unfocusable, holding the panel's place — with
+    /// `chrome: false`, so its slots render EMPTY (an empty
+    /// badge Text would still paint its padded capsule, and
+    /// a content-less panel must not show a call-to-action
+    /// pill; the slot frames hold the geometry either way).
+    @ViewBuilder
+    private func heroPanelView(_ model: HeroModel, action: (() -> Void)?) -> some View {
+        if let action {
+            Button(action: action) {
+                heroLabel(model, chrome: true)
+            }
+            .tvCardButton()
+            .focused($focusedKey, equals: model.focusKey)
+        } else {
+            heroLabel(model, chrome: false)
+        }
+    }
+
+    private func heroLabel(_ model: HeroModel, chrome: Bool) -> some View {
+        HStack(alignment: .center, spacing: 36) {
+            VStack(alignment: .leading, spacing: 14) {
+                Group {
+                    if chrome {
+                        Text(model.badgeText)
+                            .font(.system(size: 21, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(model.badgeColor))
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: Self.heroBadgeSlotHeight, alignment: .topLeading)
+                Text(model.headline)
+                    .font(.system(size: 46, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(height: Self.heroHeadlineSlotHeight, alignment: .topLeading)
+                Text(model.meta)
+                    .font(.system(size: 24))
+                    .foregroundStyle(TVPalette.heroMeta)
+                    .lineLimit(1)
+                    .frame(height: Self.heroMetaSlotHeight, alignment: .topLeading)
+                // The score slot: the fullest score block's
+                // height in every state — the block fills it
+                // (digits, then divider + events when they
+                // land) or it stays empty. "Xem ngay" below
+                // therefore sits at ONE Y for every hero.
+                Group {
+                    if let state = model.scoreState,
+                       let home = model.scoreHome, let away = model.scoreAway {
+                        heroScoreBlock(state, home: home, away: away)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: Self.heroScoreSlotHeight, alignment: .topLeading)
+                // The "Xem ngay" pill is the column's LAST
+                // element: in the shell it is omitted entirely
+                // (nothing below it can move — the column is
+                // fixed-height and top-aligned).
+                if chrome {
                     HStack(spacing: 10) {
                         Text("Xem ngay")
                             .font(.system(size: 24, weight: .semibold))
@@ -1217,17 +1442,47 @@ struct TVContentView: View {
                     .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
                     .padding(.top, 4)
                 }
-                .frame(width: 1020, height: Self.heroColumnHeight,
-                       alignment: .topLeading)
-                nuvioHeroArt(item)
             }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 28)
-            .frame(maxWidth: .infinity)
-            .background(tvHeroBackground(focused: heroFocused))
+            // Fixed widths on purpose: with a maxWidth-.infinity
+            // text column the crest pair was pushed past the
+            // panel's trailing edge and the second crest was cut
+            // off on the owner's TV (v1.2.3 live test). 1.4.8:
+            // the height is fixed too (heroColumnHeight) — the
+            // score/events block lives INSIDE this column, so
+            // it can never widen the column or push the art.
+            .frame(width: 1020, height: Self.heroColumnHeight,
+                   alignment: .topLeading)
+            heroArtView(model.art)
         }
-        .tvCardButton()
-        .focused($focusedKey, equals: "heroNV:" + item.id)
+        .padding(.horizontal, 40)
+        .padding(.vertical, 28)
+        .frame(maxWidth: .infinity)
+        .background(tvHeroBackground(focused: focusedKey == model.focusKey))
+    }
+
+    @ViewBuilder
+    private func heroArtView(_ art: HeroArt) -> some View {
+        Group {
+            switch art {
+            case .crests(let home, let away):
+                HStack(spacing: 22) {
+                    TVCrestImage(url: home, size: 160)
+                    Text("VS")
+                        .font(.system(size: 30, weight: .heavy))
+                        .foregroundStyle(.white.opacity(0.85))
+                    TVCrestImage(url: away, size: 160)
+                }
+            case .logo(let ch):
+                TVChannelLogo(channel: ch, height: 168)
+            case .tvGlyph:
+                Image(systemName: "tv")
+                    .font(.system(size: 110))
+                    .foregroundStyle(.white.opacity(0.35))
+            case .soccer:
+                TVSoccerPlaceholder(size: 110)
+            }
+        }
+        .frame(width: 440, height: 168)
     }
 
     private func nuvioHeroBadge(_ item: NuvioItem) -> String {
@@ -1261,79 +1516,6 @@ struct TVContentView: View {
             parts.append("Trận đấu qua addon Nuvio")
         }
         return parts.joined(separator: "  ·  ")
-    }
-
-    @ViewBuilder
-    private func nuvioHeroArt(_ item: NuvioItem) -> some View {
-        if item.teams != nil {
-            HStack(spacing: 22) {
-                TVCrestImage(url: item.team1Logo.flatMap(URL.init(string:)), size: 160)
-                Text("VS")
-                    .font(.system(size: 30, weight: .heavy))
-                    .foregroundStyle(.white.opacity(0.85))
-                TVCrestImage(url: item.team2Logo.flatMap(URL.init(string:)), size: 160)
-            }
-            .frame(width: 440, alignment: .center)
-        } else if !item.poster.isEmpty {
-            TVChannelLogo(channel: item.displayChannel, height: 168)
-                .frame(width: 440, height: 168)
-        } else {
-            TVSoccerPlaceholder(size: 110)
-                .frame(width: 440, height: 168)
-        }
-    }
-
-    private func fixtureHero(_ entry: TVFixtureEntry) -> some View {
-        let heroFocused = focusedKey == "hero:" + entry.id
-        return Button {
-            play(entry)
-        } label: {
-            HStack(alignment: .center, spacing: 36) {
-                VStack(alignment: .leading, spacing: 14) {
-                    heroBadge(for: entry)
-                    Text(entry.headline)
-                        .font(.system(size: 46, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Text(heroMeta(entry))
-                        .font(.system(size: 24))
-                        .foregroundStyle(TVPalette.heroMeta)
-                        .lineLimit(1)
-                    if let state = entry.state,
-                       let home = state.scoreHome, let away = state.scoreAway {
-                        heroScoreBlock(state, home: home, away: away)
-                    }
-                    HStack(spacing: 10) {
-                        Text("Xem ngay")
-                            .font(.system(size: 24, weight: .semibold))
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 19))
-                    }
-                    .foregroundStyle(TVPalette.cyan)
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 10)
-                    .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
-                    .padding(.top, 4)
-                }
-                // Fixed widths on purpose: with a maxWidth-.infinity
-                // text column the crest pair was pushed past the
-                // panel's trailing edge and the second crest was cut
-                // off on the owner's TV (v1.2.3 live test). 1.4.8:
-                // the height is fixed too (heroColumnHeight) — the
-                // score/events block lives INSIDE this column, so
-                // it can never widen the column or push the art.
-                .frame(width: 1020, height: Self.heroColumnHeight,
-                       alignment: .topLeading)
-                fixtureHeroArt(entry)
-            }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 28)
-            .frame(maxWidth: .infinity)
-            .background(tvHeroBackground(focused: heroFocused))
-        }
-        .tvCardButton()
-        .focused($focusedKey, equals: "hero:" + entry.id)
     }
 
     /// 1.4.7: the hero's score + events block. The entry's bound
@@ -1415,72 +1597,14 @@ struct TVContentView: View {
         .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
     }
 
-    private func englishHero(_ ch: Channel) -> some View {
-        let heroFocused = focusedKey == "heroEN:" + ch.url
-        return Button {
-            playRequest = PlayRequest(resolution: store.resolution(for: ch))
-        } label: {
-            HStack(alignment: .center, spacing: 36) {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("🌍 BLV TIẾNG ANH · KÊNH 24/7")
-                        .font(.system(size: 21, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(TVPalette.tealFill))
-                    Text(TVEnglish.displayName(ch))
-                        .font(.system(size: 46, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Text("Kênh tiếng Anh · phát liên tục · nguồn dự phòng khi nguồn Việt chậm hoặc chết")
-                        .font(.system(size: 24))
-                        .foregroundStyle(TVPalette.heroMeta)
-                        .lineLimit(1)
-                    HStack(spacing: 10) {
-                        Text("Xem ngay")
-                            .font(.system(size: 24, weight: .semibold))
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 19))
-                    }
-                    .foregroundStyle(TVPalette.cyan)
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 10)
-                    .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
-                    .padding(.top, 4)
-                }
-                .frame(width: 1020, height: Self.heroColumnHeight,
-                       alignment: .topLeading)
-                Group {
-                    if ch.logoURL != nil {
-                        TVChannelLogo(channel: ch, height: 168)
-                    } else {
-                        Image(systemName: "tv")
-                            .font(.system(size: 110))
-                            .foregroundStyle(.white.opacity(0.35))
-                    }
-                }
-                .frame(width: 440, height: 168)
-            }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 28)
-            .frame(maxWidth: .infinity)
-            .background(tvHeroBackground(focused: heroFocused))
-        }
-        .tvCardButton()
-        .focused($focusedKey, equals: "heroEN:" + ch.url)
-    }
-
     /// The fixture hero's badge with the matched state consulted
     /// (spec §1.4/§1.5): source minute verbatim, HT wording, or
     /// FT + final score — never PHÁT LẠI for a known FT.
-    private func heroBadge(for entry: TVFixtureEntry) -> some View {
-        heroBadgeText(bucket: store.effectiveBucket(of: entry.channel),
-                      channel: entry.channel, state: entry.state)
-    }
-
-    private func heroBadgeText(bucket: Int, channel ch: Channel,
-                               state: MatchState?) -> some View {
+    /// 1.4.9: returns the badge as DATA (text + colour) for the
+    /// one hero frame's badge slot; the computation is the
+    /// 1.4.8 one, unchanged.
+    private func heroBadgeInfo(bucket: Int, channel ch: Channel,
+                               state: MatchState?) -> (text: String, color: Color) {
         let now = Date()
         let text: String
         let color: Color
@@ -1504,12 +1628,7 @@ struct TVContentView: View {
             text = "📺 " + ch.group
             color = TVPalette.tealFill
         }
-        return Text(text)
-            .font(.system(size: 21, weight: .bold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(color))
+        return (text, color)
     }
 
     private func heroMeta(_ entry: TVFixtureEntry) -> String {
@@ -1517,30 +1636,6 @@ struct TVContentView: View {
         if !entry.channel.group.isEmpty { parts.append(entry.channel.group) }
         if entry.sourceCount > 1 { parts.append("\(entry.sourceCount) nguồn phát") }
         return parts.joined(separator: "  ·  ")
-    }
-
-    @ViewBuilder
-    private func fixtureHeroArt(_ entry: TVFixtureEntry) -> some View {
-        let ch = entry.channel
-        // 1.4.4: the hero draws the entry's displayCrests (map
-        // pair + the bound ESPN state's per-side fallback), not
-        // the bare map pair — same rule as the tiles.
-        if let pair = entry.displayCrests, pair.0 != nil || pair.1 != nil {
-            HStack(spacing: 22) {
-                TVCrestImage(url: pair.0, size: 160)
-                Text("VS")
-                    .font(.system(size: 30, weight: .heavy))
-                    .foregroundStyle(.white.opacity(0.85))
-                TVCrestImage(url: pair.1, size: 160)
-            }
-            .frame(width: 440, alignment: .center)
-        } else if ch.logoURL != nil {
-            TVChannelLogo(channel: ch, height: 168)
-                .frame(width: 440, height: 168)
-        } else {
-            TVSoccerPlaceholder(size: 110)
-                .frame(width: 440, height: 168)
-        }
     }
 
     // MARK: - Rails and cards

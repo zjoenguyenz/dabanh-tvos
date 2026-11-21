@@ -557,6 +557,10 @@ enum FixtureGrouping {
                 buckets.append(Bucket(pairKey: pk, dateKey: dk, idxs: [i]))
             }
         }
+        // Clusters are collected across buckets first
+        // (1.4.9, FL-361): the date bridge below needs every
+        // cluster of a pair side by side before ids register.
+        var pending: [(pairKey: String, dateKey: String, members: [Int])] = []
         for bucket in buckets {
             func earliest(of cluster: [Int]) -> Date {
                 cluster.map { channels[$0].kickoff! }.min()!
@@ -593,9 +597,75 @@ enum FixtureGrouping {
                     .map { clusters[$0] } + [merged]
             }
             for cluster in clusters {
-                let id = "fx2:" + bucket.pairKey + "|" + bucket.dateKey + "|"
-                    + String(Int(earliest(of: cluster).timeIntervalSince1970))
-                register(id, cluster)
+                pending.append((pairKey: bucket.pairKey,
+                                dateKey: bucket.dateKey, members: cluster))
+            }
+        }
+        // 1.4.9 (FL-361, trace escape E2): bridge the ICT date
+        // boundary. The bucket key hard-partitioned on the
+        // stamp's calendar date, so one fixture whose listings
+        // were stamped on neighbouring dates (a scraped extra
+        // carrying 21/11 against the main list's 00:30 22/11)
+        // could NEVER merge, however close the instants — two
+        // board entries for one match, the mis-stamped one
+        // usually bare, because the state lookup's ±1-day seam
+        // forgives 3 h while the grouping forgave nothing.
+        // Clusters of the same pair chaining within that same
+        // 3 h seam ACROSS the boundary are one fixture; the
+        // merged group keeps the earliest cluster's date as
+        // its id basis. Same-date clusters are untouched (the
+        // 45-min chain + live merge above already govern
+        // them), and clusters further apart stay separate —
+        // two real matches of one pair on adjacent days are
+        // many hours apart, never inside the seam.
+        func kickoffSpan(_ members: [Int]) -> (earliest: Date, latest: Date) {
+            let stamps = members.map { channels[$0].kickoff! }
+            return (stamps.min()!, stamps.max()!)
+        }
+        var pairOrder: [String] = []
+        var clustersByPair: [String: [(dateKey: String, members: [Int])]] = [:]
+        for p in pending {
+            if clustersByPair[p.pairKey] == nil { pairOrder.append(p.pairKey) }
+            clustersByPair[p.pairKey, default: []].append((p.dateKey, p.members))
+        }
+        for pair in pairOrder {
+            let clusters = clustersByPair[pair]!.sorted {
+                kickoffSpan($0.members).earliest < kickoffSpan($1.members).earliest
+            }
+            var current: (dateKey: String, members: [Int])?
+            var lastMergedDateKey: String?
+            for c in clusters {
+                guard let cur = current else {
+                    current = c
+                    lastMergedDateKey = c.dateKey
+                    continue
+                }
+                // The bridge test compares the candidate
+                // against the PREVIOUS cluster's date, not the
+                // group's retained (earliest) one: after a
+                // day-1 + day-2 merge, a second day-2 cluster
+                // must test as same-date against day 2 and stay
+                // apart — the 45-min chain already judged it a
+                // different fixture from its day-2 sibling, and
+                // the bridge must never undo a same-date
+                // judgement transitively.
+                if c.dateKey != lastMergedDateKey,
+                   kickoffSpan(c.members).earliest
+                       .timeIntervalSince(kickoffSpan(cur.members).latest) <= 3 * 3600 {
+                    current = (cur.dateKey, cur.members + c.members)
+                    lastMergedDateKey = c.dateKey
+                } else {
+                    let earliest = kickoffSpan(cur.members).earliest
+                    register("fx2:" + pair + "|" + cur.dateKey + "|"
+                        + String(Int(earliest.timeIntervalSince1970)), cur.members)
+                    current = c
+                    lastMergedDateKey = c.dateKey
+                }
+            }
+            if let cur = current {
+                let earliest = kickoffSpan(cur.members).earliest
+                register("fx2:" + pair + "|" + cur.dateKey + "|"
+                    + String(Int(earliest.timeIntervalSince1970)), cur.members)
             }
         }
 

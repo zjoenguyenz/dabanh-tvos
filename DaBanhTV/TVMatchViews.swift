@@ -554,22 +554,32 @@ struct TVCrestRow: View {
 
     var body: some View {
         let pair = filledPair
-        if let pair, pair.0 != nil || pair.1 != nil {
-            HStack(spacing: 10) {
-                TVCrestImage(url: pair.0, size: crestSize)
-                if pair.0 != nil && pair.1 != nil {
-                    Text("vs")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
+        Group {
+            if let pair, pair.0 != nil || pair.1 != nil {
+                HStack(spacing: 10) {
+                    TVCrestImage(url: pair.0, size: crestSize)
+                    if pair.0 != nil && pair.1 != nil {
+                        Text("vs")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    TVCrestImage(url: pair.1, size: crestSize)
+                    if (pair.0 == nil) != (pair.1 == nil) {
+                        TVChannelLogo(channel: channel, height: 46)
+                    }
                 }
-                TVCrestImage(url: pair.1, size: crestSize)
-                if (pair.0 == nil) != (pair.1 == nil) {
-                    TVChannelLogo(channel: channel, height: 46)
-                }
+            } else {
+                TVChannelLogo(channel: channel, height: logoHeight)
             }
-        } else {
-            TVChannelLogo(channel: channel, height: logoHeight)
         }
+        // 1.4.9 (FL-360, audit S-7): the row's height is the
+        // crest height in BOTH branches — the logo branch was
+        // 54 against the pair branch's 62, so a tile whose
+        // crest pair arrived late (the ESPN fallback filling
+        // a missing side when its state landed) grew its
+        // first row by 8 pt and pushed the headline inside
+        // the tile. The row now holds 62 either way.
+        .frame(height: max(crestSize, logoHeight))
     }
 }
 
@@ -750,6 +760,13 @@ struct TVLiveBoardView: View {
                 Spacer(minLength: 0)
                 badge
             }
+            // 1.4.9 (FL-360, audit S-7): the header row holds
+            // the badge's height (25 pt line + its padding
+            // ≈ 39) whether or not a badge is showing — a
+            // badge landing with the tile's state no longer
+            // grows the row and pushes the score row down
+            // inside the fixed 342 frame.
+            .frame(height: 39)
             scoreRow
             if let state = entry.state, !state.events.isEmpty {
                 eventsBlock(state)
@@ -1027,13 +1044,34 @@ struct TVFixtureRail: View {
 
     private var keyPrefix: String { style == .featured ? "feat:" : "rail:" }
 
+    /// 1.4.9 (FL-360, audit S-3): the rail's slot height —
+    /// every tile in the rail occupies the SAME height, so
+    /// the rail's height is a property of the rail, not of
+    /// which tile happens to be tallest today. Featured:
+    /// always the board height 342 (the 330 featured card
+    /// keeps its own face; the slot reserves the board's 12
+    /// extra points, so the last board flipping to a card at
+    /// FT no longer drops the rail and pulls every section
+    /// below up). Standard: the board height when any entry
+    /// renders as a board, else the card height — a standard
+    /// rail's height can still change when its FIRST board
+    /// arrives (a live state landing is a data-truth change;
+    /// the alternative, a permanent 90 pt dead band under
+    /// every card rail, is the worse always-visible defect),
+    /// but tiles are top-aligned in the slot, so an existing
+    /// tile never moves when a taller sibling lands.
+    private var slotHeight: CGFloat {
+        if style == .featured { return 342 }
+        return entries.contains { $0.isLive } ? 342 : 252
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(.white)
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 28) {
+                LazyHStack(alignment: .top, spacing: 28) {
                     ForEach(entries) { entry in
                         Button {
                             onSelect(entry)
@@ -1051,6 +1089,7 @@ struct TVFixtureRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: keyPrefix + entry.id)
+                        .frame(height: slotHeight, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 8)

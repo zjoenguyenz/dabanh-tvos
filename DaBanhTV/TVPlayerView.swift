@@ -575,6 +575,12 @@ struct TVMatchBoardView: View {
                                 ? TVPalette.htAmber : TVPalette.minuteRed))
                 }
             }
+            // 1.4.9 (FL-360, audit S-4): the first row holds the
+            // badge's height (25 pt line + its padding ≈ 39)
+            // whether or not a badge is showing, so a badge
+            // can never push the headline row down inside the
+            // header cluster.
+            .frame(height: 39)
             HStack(alignment: .center, spacing: 22) {
                 Text(entry.headline)
                     .font(.system(size: 40, weight: .bold))
@@ -595,6 +601,18 @@ struct TVMatchBoardView: View {
             }
             if let state = entry.state, !state.events.isEmpty {
                 eventLines(state)
+            } else if entry.state?.status == .live || entry.state?.status == .ht {
+                // 1.4.9 (FL-360, audit S-4): a live board whose
+                // events have not landed yet reserves the event
+                // lines' space (two goal lines + the card line
+                // at 19 pt with the cluster's spacing ≈ 81), so
+                // the first goal/card arriving can never push
+                // the source rows below while the owner is
+                // already reading them. A finished or upcoming
+                // board reserves nothing: its events are final
+                // or impossible, and the space would be dead.
+                Color.clear
+                    .frame(height: 81)
             }
         }
     }
