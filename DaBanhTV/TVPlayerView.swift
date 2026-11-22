@@ -260,11 +260,11 @@ struct TVPlayerView: View {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Chọn nguồn phát")
-                                .font(.system(size: 34, weight: .bold))
+                                .font(TVDesignFont.ui(34, .bold))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
                             Text(ctx.title)
-                                .font(.system(size: 20))
+                                .font(TVDesignFont.ui(20))
                                 .foregroundStyle(theme.leagueTx)
                                 .lineLimit(1)
                         }
@@ -378,12 +378,12 @@ struct TVPlayerView: View {
                                    selectable: Int) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .font(TVDesignFont.ui(24, .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Spacer(minLength: 0)
             Text("\(total) nguồn · \(selectable) có thể chọn")
-                .font(.system(size: 17))
+                .font(TVDesignFont.ui(17))
                 .foregroundStyle(theme.leagueTx)
                 .lineLimit(1)
         }
@@ -729,10 +729,10 @@ private struct PlayerSurface: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text("Không có tín hiệu")
-                .font(.system(size: 48, weight: .bold))
+                .font(TVDesignFont.ui(48, .bold))
                 .foregroundStyle(.white)
             Text("Tất cả các nguồn của trận này đều không phát được.")
-                .font(.system(size: 22))
+                .font(TVDesignFont.ui(22))
                 .foregroundStyle(.white.opacity(0.65))
             HStack(spacing: 18) {
                 slateButton(title: "Thử lại", id: "slate:retry",
@@ -770,7 +770,7 @@ private struct PlayerSurface: View {
         let focused = slateFocus == id
         return Button(action: action) {
             Text(title)
-                .font(.system(size: 24, weight: .bold))
+                .font(TVDesignFont.ui(24, .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .padding(.horizontal, 34)
@@ -810,12 +810,13 @@ func tvSourceHealthText(for url: String) -> String {
 /// One source row under the design theme — the Detail
 /// drawing's row, shared by the source board and the
 /// in-player switch panel: cream logo chip (FIXED 68×52,
-/// FL-360), name + KHUYÊN DÙNG on the first VN row, the real
-/// sub-line (the channel's group + the position-derived
-/// primary/backup suffix for VN, the detail verbatim for EN),
-/// and the trailing slot: the health line + arrow, or — in
-/// the switch panel — the playing row's check. Focused =
-/// the family's maroon gradient + gold border. A PROVEN-DEAD
+/// FL-360), name + KHUYÊN DÙNG on the first VN row, the
+/// drawn sub-line (the commentary line; the playing row
+/// carries "Đang phát" in it — 1.7.5, RECALC-DABANH
+/// B9/B14), and the trailing slot: the health line + arrow,
+/// or — in the switch panel — the playing row's check.
+/// Focused = the family's maroon gradient + gold border
+/// (2 pt, the StateLibrary §01 value — 1.7.5, B12). A PROVEN-DEAD
 /// source (the same SourceHealth value that produces its
 /// "Không khả dụng" health text) renders the drawn
 /// unavailable state (DetailSourceUnavailable, StateLibrary
@@ -834,12 +835,18 @@ struct TVDesignSourceRow: View {
     let focused: Bool
     let theme: TVThemeTokens
 
+    /// The drawn sub-line (1.7.5, RECALC-DABANH B9): every
+    /// board drawing carries the commentary line — the
+    /// 1.7.4 build's channel-group + primary/backup suffix
+    /// was the component library's variant, not the
+    /// screen's. The playing row's marker rides in the
+    /// sub-line too (B14 / StateLibrary §01: "Đang phát"),
+    /// not after the title. `detail`/`isPrimary` no longer
+    /// feed the sub-line; isPrimary still drives the
+    /// KHUYÊN DÙNG marker (the owner's standing rule).
     private var sub: String {
-        if isVN {
-            let suffix = isPrimary ? "Nguồn chính" : "Nguồn dự phòng"
-            return detail.isEmpty ? suffix : detail + " · " + suffix
-        }
-        return detail
+        let commentary = isVN ? "Bình luận tiếng Việt" : "English commentary"
+        return playing ? commentary + " · Đang phát" : commentary
     }
 
     var body: some View {
@@ -869,28 +876,21 @@ struct TVDesignSourceRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 10) {
                     Text(title)
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(TVDesignFont.ui(26, .semibold))
                         .foregroundStyle(unavailable
                             ? Color.white.opacity(0.45) : .white)
                         .lineLimit(1)
                     if isVN && isPrimary {
                         Text("KHUYÊN DÙNG")
-                            .font(.system(size: 15, weight: .bold))
+                            .font(TVDesignFont.ui(15, .bold))
                             .tracking(1)
-                            .foregroundStyle(unavailable
-                                ? theme.accent.opacity(0.45) : theme.accent)
-                            .lineLimit(1)
-                    }
-                    if playing {
-                        Text("(đang phát)")
-                            .font(.system(size: 20))
                             .foregroundStyle(unavailable
                                 ? theme.accent.opacity(0.45) : theme.accent)
                             .lineLimit(1)
                     }
                 }
                 Text(sub)
-                    .font(.system(size: 17))
+                    .font(TVDesignFont.ui(17))
                     .foregroundStyle(unavailable
                         ? theme.leagueTx.opacity(0.5) : theme.leagueTx)
                     .lineLimit(1)
@@ -904,7 +904,7 @@ struct TVDesignSourceRow: View {
             // swaps the arrow for the check, nothing else.
             HStack(spacing: 12) {
                 Text(healthText)
-                    .font(.system(size: 19))
+                    .font(TVDesignFont.ui(19))
                     .foregroundStyle(unavailable
                         ? theme.leagueTx.opacity(0.5) : theme.leagueTx)
                     .lineLimit(1)
@@ -915,7 +915,10 @@ struct TVDesignSourceRow: View {
                             ? theme.accent.opacity(0.45) : theme.accent)
                         .frame(width: 30)
                 } else {
-                    Image(systemName: focused ? "play.fill" : "arrow.right")
+                    // 1.7.5 (RECALC-DABANH B11): every focus
+                    // drawing keeps the "→" — the 1.7.4 build
+                    // swapped it for a play glyph on focus.
+                    Image(systemName: "arrow.right")
                         .font(.system(size: 20))
                         .foregroundStyle(focused ? theme.accent
                                                  : (unavailable
@@ -937,7 +940,7 @@ struct TVDesignSourceRow: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
                         .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
-                                      lineWidth: focused ? 2.5 : 1)))
+                                      lineWidth: focused ? 2 : 1)))
     }
 }
 
@@ -1290,9 +1293,11 @@ struct TVMatchBoardView: View {
                 .ignoresSafeArea()
             VStack(alignment: .leading, spacing: 0) {
                 TVDesignHeader()
+                // 1.7.5 (RECALC-DABANH C3): the drawn back
+                // line is in the Text colour, not Muted.
                 Text("← Tất cả trận đấu")
-                    .font(.system(size: 21, weight: .semibold))
-                    .foregroundStyle(theme.leagueTx)
+                    .font(TVDesignFont.ui(21, .semibold))
+                    .foregroundStyle(theme.teamTx)
                     .lineLimit(1)
                     .padding(.top, 26)
                 centreLeagueBlock
@@ -1304,6 +1309,19 @@ struct TVMatchBoardView: View {
                 if liveEntry.state != nil, liveEntry.teams != nil {
                     designTimeline
                 }
+                // 1.7.5 (C14): the centre's fixed footer
+                // bar — the drawing carries it; 1.7.4's
+                // centre had none.
+                TVDesignFooterBar(
+                    position: wallpaperCounter.position,
+                    count: wallpaperCounter.count,
+                    focus: $focusedRow,
+                    focusValue: "design:footer",
+                    onChangeBackground: {
+                        themeStore.cycleBackground(
+                            count: wallpaperCounter.count)
+                    })
+                    .padding(.top, 16)
             }
             .padding(.horizontal, 100)
             .padding(.top, 28)
@@ -1314,12 +1332,12 @@ struct TVMatchBoardView: View {
     private var centreLeagueBlock: some View {
         VStack(spacing: 8) {
             Text(entry.competitionLabel)
-                .font(.system(size: 17, weight: .bold))
+                .font(TVDesignFont.ui(17, .bold))
                 .tracking(3)
                 .foregroundStyle(theme.accent)
                 .lineLimit(1)
             Text(boardMetadata)
-                .font(.system(size: 20))
+                .font(TVDesignFont.ui(20))
                 .foregroundStyle(.white.opacity(0.75))
                 .lineLimit(1)
         }
@@ -1347,7 +1365,7 @@ struct TVMatchBoardView: View {
                 VStack(spacing: 14) {
                     TVChannelLogo(channel: entry.channel, height: 110)
                     Text(entry.cleanTitle)
-                        .font(.system(size: 34, weight: .bold))
+                        .font(TVDesignFont.ui(34, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
@@ -1367,10 +1385,11 @@ struct TVMatchBoardView: View {
                 if let state = liveEntry.state,
                    let home = state.scoreHome, let away = state.scoreAway {
                     TVScoreDigits(home: home, away: away,
-                                  size: 150, separator: " : ")
+                                  size: 150, separator: " : ",
+                                  design: true)
                 } else {
                     Text("VS")
-                        .font(.system(size: 150, weight: .bold))
+                        .font(TVDesignFont.display(150))
                         .foregroundStyle(.white)
                 }
             }
@@ -1389,7 +1408,7 @@ struct TVMatchBoardView: View {
                     centreLivePill
                     if let minute = state.minuteText {
                         Text(minute)
-                            .font(.system(size: 22, weight: .bold))
+                            .font(TVDesignFont.ui(22, .bold))
                             .foregroundStyle(theme.accent)
                     }
                 }
@@ -1399,7 +1418,7 @@ struct TVMatchBoardView: View {
                 // nothing more is claimed.
                 VStack(spacing: 8) {
                     Text("Không có dữ liệu tỷ số")
-                        .font(.system(size: 20))
+                        .font(TVDesignFont.ui(20))
                         .foregroundStyle(.white.opacity(0.6))
                     centreLivePill
                 }
@@ -1411,7 +1430,7 @@ struct TVMatchBoardView: View {
             // its "FT" instead of falling into the no-data
             // line (gate A-v3-1b).
             Text(badge)
-                .font(.system(size: 22, weight: .bold))
+                .font(TVDesignFont.ui(22, .bold))
                 .foregroundStyle(theme.accent)
         } else if state?.scoreHome == nil {
             // Score-less or no state, not live, no badge:
@@ -1426,11 +1445,11 @@ struct TVMatchBoardView: View {
             // N-2 note.
             VStack(spacing: 8) {
                 Text("Không có dữ liệu tỷ số")
-                    .font(.system(size: 20))
+                    .font(TVDesignFont.ui(20))
                     .foregroundStyle(.white.opacity(0.7))
                 if let kickoff = entry.channel.kickoff, kickoff > Date() {
                     Text("Khởi tranh " + TVKickoffFormat.time.string(from: kickoff))
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(TVDesignFont.ui(20, .semibold))
                         .foregroundStyle(.white)
                 }
             }
@@ -1446,7 +1465,7 @@ struct TVMatchBoardView: View {
                 .fill(.white)
                 .frame(width: 9, height: 9)
             Text("TRỰC TIẾP")
-                .font(.system(size: 15, weight: .heavy))
+                .font(TVDesignFont.ui(15, .heavy))
                 .foregroundStyle(.white)
         }
         .padding(.horizontal, 14)
@@ -1475,13 +1494,13 @@ struct TVMatchBoardView: View {
     private func centreNameBlock(name: String, side: String) -> some View {
         VStack(spacing: 6) {
             Text(name)
-                .font(.system(size: 40, weight: .bold))
+                .font(TVDesignFont.ui(40, .bold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .frame(height: 96, alignment: .top)
             Text(side)
-                .font(.system(size: 15, weight: .semibold))
+                .font(TVDesignFont.ui(15, .semibold))
                 .tracking(2)
                 .foregroundStyle(theme.leagueTx)
         }
@@ -1512,7 +1531,7 @@ struct TVMatchBoardView: View {
     private func centreScorerText(_ goals: [MatchEvent]) -> some View {
         Text(goals.map { "\($0.playerName) \($0.minuteText)" }
                 .joined(separator: " · "))
-            .font(.system(size: 20))
+            .font(TVDesignFont.ui(20))
             .foregroundStyle(.white.opacity(0.85))
             .lineLimit(2)
             .multilineTextAlignment(.center)
@@ -1544,17 +1563,22 @@ struct TVMatchBoardView: View {
             } label: {
                 HStack(spacing: 14) {
                     Text("▶ Xem trận đấu")
-                        .font(.system(size: 23, weight: .bold))
+                        .font(TVDesignFont.ui(21, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     Text("\(total) nguồn · \(selectableSources) có thể chọn")
-                        .font(.system(size: 15))
+                        .font(TVDesignFont.ui(14))
                         .foregroundStyle(.white.opacity(0.85))
                         .lineLimit(1)
                 }
-                .padding(.horizontal, 26)
-                .frame(width: 470, height: 64)
+                .padding(.horizontal, 20)
+                // 1.7.5 (RECALC-DABANH C10/C11): the drawn
+                // CTA is 373 × 56 with text ≈21/14 — the
+                // 1.7.4 build's 470 × 64 / 23/15 came from
+                // the superseded capture, not the delivered
+                // drawing.
+                .frame(width: 373, height: 56)
                 .background(
                     RoundedRectangle(cornerRadius: 10)
                         .fill(total == 0 ? theme.tileBG : theme.unitedRed)
@@ -1595,7 +1619,7 @@ struct TVMatchBoardView: View {
                 .fill(Color.white.opacity(0.12))
                 .frame(height: 1)
             Text("Diễn biến")
-                .font(.system(size: 20, weight: .semibold))
+                .font(TVDesignFont.ui(20, .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             GeometryReader { geo in
@@ -1626,11 +1650,11 @@ struct TVMatchBoardView: View {
                     ForEach(Array(goals.enumerated()), id: \.offset) { _, goal in
                         VStack(spacing: 2) {
                             Text(goal.text)
-                                .font(.system(size: 16))
+                                .font(TVDesignFont.ui(16))
                                 .foregroundStyle(theme.leagueTx)
                                 .lineLimit(1)
                             Text(goal.name)
-                                .font(.system(size: 18))
+                                .font(TVDesignFont.ui(18))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
                         }
@@ -1665,9 +1689,12 @@ struct TVMatchBoardView: View {
             }
             VStack(alignment: .leading, spacing: 22) {
                 TVDesignHeader()
+                // 1.7.5 (C3 family): the board's back line
+                // takes the Text colour too — the same drawn
+                // element as the centre's.
                 Text("← Trận đấu")
-                    .font(.system(size: 21, weight: .semibold))
-                    .foregroundStyle(theme.leagueTx)
+                    .font(TVDesignFont.ui(21, .semibold))
+                    .foregroundStyle(theme.teamTx)
                     .lineLimit(1)
                 HStack(alignment: .top, spacing: 22) {
                     designLeftColumn
@@ -1697,7 +1724,7 @@ struct TVMatchBoardView: View {
     private var designLeftColumn: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(entry.competitionLabel)
-                .font(.system(size: 17, weight: .bold))
+                .font(TVDesignFont.ui(17, .bold))
                 .tracking(3)
                 .foregroundStyle(theme.accent)
                 .lineLimit(1)
@@ -1709,7 +1736,7 @@ struct TVMatchBoardView: View {
                             .foregroundStyle(.white)
                             .lineLimit(3)
                         Text("vs")
-                            .font(.system(size: 20, weight: .semibold))
+                            .font(TVDesignFont.ui(20, .semibold))
                             .foregroundStyle(theme.leagueTx)
                         Text(teams.1.uppercased())
                             .font(.system(size: designHeadlineSize, weight: .heavy))
@@ -1718,13 +1745,13 @@ struct TVMatchBoardView: View {
                     }
                 } else {
                     Text(liveEntry.headline)
-                        .font(.system(size: 40, weight: .bold))
+                        .font(TVDesignFont.ui(40, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(3)
                 }
             }
             Text(boardMetadata)
-                .font(.system(size: 20))
+                .font(TVDesignFont.ui(20))
                 .foregroundStyle(.white.opacity(0.75))
                 .lineLimit(1)
             designBoardCrestRow
@@ -1737,7 +1764,7 @@ struct TVMatchBoardView: View {
                 Text("Có thể đổi nguồn trong trình phát.")
                 Text("Nguồn Tiếng Việt hiển thị trước English.")
             }
-            .font(.system(size: 19))
+            .font(TVDesignFont.ui(19))
             .foregroundStyle(theme.leagueTx)
         }
         .frame(width: 580, alignment: .leading)
@@ -1753,10 +1780,11 @@ struct TVMatchBoardView: View {
                     if let state = liveEntry.state,
                        let home = state.scoreHome, let away = state.scoreAway {
                         TVScoreDigits(home: home, away: away,
-                                      size: 64, separator: " : ")
+                                      size: 64, separator: " : ",
+                                      design: true)
                     } else {
                         Text("VS")
-                            .font(.system(size: 56, weight: .bold))
+                            .font(TVDesignFont.display(56))
                             .foregroundStyle(.white)
                     }
                 }
@@ -1778,7 +1806,7 @@ struct TVMatchBoardView: View {
                 centreLivePill
                 if let minute = liveEntry.state?.minuteText {
                     Text(minute)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(TVDesignFont.ui(22, .bold))
                         .italic()
                         .foregroundStyle(theme.accent)
                 }
@@ -1786,17 +1814,17 @@ struct TVMatchBoardView: View {
             .frame(height: 34, alignment: .leading)
         } else if let badge = liveEntry.badgeText {
             Text(badge)
-                .font(.system(size: 22, weight: .bold))
+                .font(TVDesignFont.ui(22, .bold))
                 .foregroundStyle(theme.accent)
                 .frame(height: 34, alignment: .leading)
         } else if liveEntry.state?.scoreHome == nil {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Không có dữ liệu tỷ số")
-                    .font(.system(size: 20))
+                    .font(TVDesignFont.ui(20))
                     .foregroundStyle(.white.opacity(0.7))
                 if let kickoff = entry.channel.kickoff, kickoff > Date() {
                     Text("Khởi tranh " + TVKickoffFormat.time.string(from: kickoff))
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(TVDesignFont.ui(20, .semibold))
                         .foregroundStyle(.white)
                 }
             }
@@ -1808,11 +1836,11 @@ struct TVMatchBoardView: View {
             VStack(alignment: .leading, spacing: 26) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Chọn nguồn phát")
-                        .font(.system(size: 44, weight: .bold))
+                        .font(TVDesignFont.ui(44, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                     Text("\(totalSources) nguồn · \(selectableSources) có thể chọn")
-                        .font(.system(size: 20))
+                        .font(TVDesignFont.ui(20))
                         .foregroundStyle(theme.leagueTx)
                         .lineLimit(1)
                 }
@@ -1824,13 +1852,13 @@ struct TVMatchBoardView: View {
                             .fill(Color.white.opacity(0.12))
                             .frame(height: 1)
                         Text("Chưa có nguồn phát cho trận đấu này. Quay lại để chọn trận khác.")
-                            .font(.system(size: 20))
+                            .font(TVDesignFont.ui(20))
                             .foregroundStyle(.white.opacity(0.8))
                             .lineLimit(2)
                     }
                 }
                 Text("\"Có thể chọn\" bao gồm nguồn chưa kiểm tra; không xác nhận đang phát.")
-                    .font(.system(size: 17))
+                    .font(TVDesignFont.ui(17))
                     .italic()
                     .foregroundStyle(theme.leagueTx)
                     .lineLimit(2)
@@ -1903,15 +1931,26 @@ struct TVMatchBoardView: View {
                                         selectable: Int) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .font(TVDesignFont.ui(24, .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Spacer(minLength: 0)
             Text("\(total) nguồn · \(selectable) có thể chọn")
-                .font(.system(size: 17))
+                .font(TVDesignFont.ui(17))
                 .foregroundStyle(theme.leagueTx)
                 .lineLimit(1)
         }
+    }
+
+    /// The wallpaper counter for the design footer bar
+    /// (1.7.5): the shared list's count + the persisted
+    /// choice's 1-based position in it (0 when the list is
+    /// empty — the bar then hides its control).
+    private var wallpaperCounter: (position: Int, count: Int) {
+        let images = Wallpapers.images()
+        guard !images.isEmpty else { return (0, 0) }
+        let count = images.count
+        return (((themeStore.bgIndex % count) + count) % count + 1, count)
     }
 
     /// The current MU wallpaper, if any: the shared list in

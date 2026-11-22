@@ -512,6 +512,17 @@ struct TVContentView: View {
                     .lineLimit(1)
                     .frame(height: 24)
                 scrollBody
+                // 1.7.5 (RECALC-DABANH H13): under the design
+                // theme the footer is the drawing's FIXED bar
+                // (hairline + hints + the change-background
+                // text control), a root row UNDER the scroll
+                // body — it never scrolls. The in-flow
+                // footerRow renders nothing under the design
+                // theme; its Classic / MU Wally forms are
+                // untouched.
+                if theme.id.isDesign {
+                    designFooterBar
+                }
             }
             // 1.5.1 (FL-360, owner ruling 2026-11-21 15:36 CST:
             // "Hiện đóng khung nhỏ hơn nên thiếu diện tích các
@@ -932,13 +943,43 @@ struct TVContentView: View {
         // compact and does not grow — it shrinks.
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
-                if !enChannels.isEmpty || nuvio.hasContent {
-                    tabPill(title: "ENG", value: Self.enTabValue)
-                }
-                tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
-                tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
-                ForEach(League.tabOrder) { league in
-                    tabPill(title: league.tabTitle, value: league.rawValue)
+                if theme.id.isDesign {
+                    // 1.7.5 (RECALC-DABANH H3): the design
+                    // theme's tab row is the DRAWING's
+                    // inventory — Trực tiếp · Sắp diễn ra ·
+                    // the five leagues by their full names ·
+                    // Khác. No ENG tab, no Hot tab, no emoji,
+                    // no flag pills. The values are the app's
+                    // own: "Sắp diễn ra" selects the Hot tab
+                    // value — the app's upcoming-bearing list
+                    // (its empty-state text has always sent
+                    // sắp-đá viewers there). Recorded
+                    // honestly: that list is the mirror's
+                    // hot-flagged set, live-first — a live hot
+                    // match can appear there, under its
+                    // "Trực tiếp" rail; the label is the
+                    // drawing's, the list is the closest the
+                    // app has (gate record, 1.7.5). The cups
+                    // value has no tab under this theme (cup
+                    // fixtures still surface in the Trực tiếp
+                    // rails and their league tabs).
+                    tabPill(title: "Trực tiếp", value: PlaylistStore.liveTabValue)
+                    tabPill(title: "Sắp diễn ra", value: PlaylistStore.hotTabValue)
+                    tabPill(title: "Premier League", value: League.england.rawValue)
+                    tabPill(title: "La Liga", value: League.spain.rawValue)
+                    tabPill(title: "Serie A", value: League.italy.rawValue)
+                    tabPill(title: "Bundesliga", value: League.germany.rawValue)
+                    tabPill(title: "Ligue 1", value: League.france.rawValue)
+                    tabPill(title: "Khác", value: League.other.rawValue)
+                } else {
+                    if !enChannels.isEmpty || nuvio.hasContent {
+                        tabPill(title: "ENG", value: Self.enTabValue)
+                    }
+                    tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
+                    tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
+                    ForEach(League.tabOrder) { league in
+                        tabPill(title: league.tabTitle, value: league.rawValue)
+                    }
                 }
                 Spacer()
             }
@@ -1089,9 +1130,18 @@ struct TVContentView: View {
 
     private var emptyText: String {
         if store.selectedLeague == PlaylistStore.liveTabValue {
+            // 1.7.5: under the design theme the inventory has
+            // no 🔥 Hot tab — the same list is named
+            // "Sắp diễn ra" there, and the copy follows.
+            if theme.id.isDesign {
+                return "Hiện không có trận nào đang đá. Các trận sắp đá nằm ở tab Sắp diễn ra và các tab giải."
+            }
             return "Hiện không có trận nào đang đá. Các trận sắp đá nằm ở tab 🔥 Hot và các tab giải."
         }
         if store.selectedLeague == PlaylistStore.hotTabValue {
+            if theme.id.isDesign {
+                return "Chưa có trận nào trong mục Sắp diễn ra."
+            }
             return "Chưa có trận hot nào. Trang nguồn gắn cờ hot cho trận nào thì trận đó hiện ở đây."
         }
         if isCupTab {
@@ -1227,7 +1277,10 @@ struct TVContentView: View {
                                     // same entries, keys and
                                     // order; the design header
                                     // carries no date note.
-                                    TVDesignFixtureRail(title: "🔴  ĐANG ĐÁ",
+                                    // 1.7.5: its title is the
+                                    // drawing's "Trực tiếp" —
+                                    // no emoji on design rails.
+                                    TVDesignFixtureRail(title: "Trực tiếp",
                                                         entries: featuredEntries + live,
                                                         keyFor: { featuredIDs.contains($0.id) ? "feat:" + $0.id : "rail:" + $0.id },
                                                         onSelect: play,
@@ -1256,7 +1309,11 @@ struct TVContentView: View {
                             nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", leagueLiveEvents)
                         }
                         if !muUpcoming.isEmpty {
-                            railSection("⏰  SẮP ĐÁ", muUpcoming,
+                            // 1.7.5: under the design theme the
+                            // drawn rail title is "Sắp diễn ra";
+                            // MU Wally keeps its shipped title.
+                            railSection(theme.id.isDesign ? "Sắp diễn ra" : "⏰  SẮP ĐÁ",
+                                        muUpcoming,
                                         muNote: TVKickoffFormat.muRailDateFormatter.string(from: now))
                         }
                         if !leagueUpcomingEvents.isEmpty {
@@ -1394,7 +1451,33 @@ struct TVContentView: View {
         }
     }
 
+    /// The design Home's fixed footer bar (1.7.5): the
+    /// shared TVDesignFooterBar fed with this view's
+    /// wallpaper data; its button keeps the in-flow footer's
+    /// focus id ("ftr:bg" — the in-flow row is suppressed
+    /// under the design theme, so the id has one owner).
+    private var designFooterBar: some View {
+        let images = Wallpapers.images()
+        let count = images.count
+        let position = count > 0
+            ? ((themeStore.bgIndex % count) + count) % count + 1 : 0
+        return TVDesignFooterBar(
+            position: position, count: count,
+            focus: $focusedKey, focusValue: "ftr:bg",
+            onChangeBackground: {
+                themeStore.cycleBackground(count: count)
+                DiagLog.write("theme", "mu background cycled to \(themeStore.bgIndex + 1)/\(count)")
+            })
+    }
+
+    @ViewBuilder
     private var footerRow: some View {
+        if theme.id.isDesign {
+            // 1.7.5: the design theme's footer is the fixed
+            // bar at the root (designFooterBar above) — the
+            // in-flow row stands down under this theme only.
+            EmptyView()
+        } else {
         HStack {
             // 1.7.2 (owner ruling 2026-11-22 00:40 CST —
             // "bỏ đi luôn": he watches at home, no credit
@@ -1435,6 +1518,7 @@ struct TVContentView: View {
             Text("Đá Banh TV v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"))
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
+        }
         }
     }
 

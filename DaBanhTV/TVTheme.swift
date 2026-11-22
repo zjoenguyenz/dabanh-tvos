@@ -259,6 +259,88 @@ final class TVThemeStore: ObservableObject {
     }
 }
 
+// MARK: - Design type programme (1.7.5)
+
+/// The Manchester United (design) theme's typefaces: the
+/// designer spec sheet's programme ("Outfit for UI; Barlow
+/// Condensed 800 for display") as settled by the owner's
+/// ruling of 2026-11-22. Outfit carries NO Vietnamese
+/// glyphs (measured: 92 of the 104-char Vietnamese set
+/// missing), so the UI/body face is Manrope — full
+/// Vietnamese coverage (0/104 missing), the closest
+/// geometry to Outfit — and display stays Barlow Condensed
+/// 800, the designer's exact face, which carries the full
+/// Vietnamese set. Both families are bundled
+/// (DaBanhTV/Fonts/, registered via UIAppFonts in
+/// project.yml) — the same verified files the iOS build
+/// ships (the substitution + reason are recorded in
+/// work-175/GATE-RECORD-175.md). Resolution is fail-soft,
+/// the iOS family's pattern: an unregistered name falls
+/// back to the system font at the same size and weight, so
+/// a bundle mistake degrades letterforms, never layout.
+/// ONLY design-theme faces read these helpers — Classic
+/// and MU Wally keep the system font exactly as before.
+/// Every weight the mapping names is bundled: Light 300
+/// (no call site yet — bundled so the mapping is honest),
+/// Regular 400, Medium 500, SemiBold 600, Bold 700 and
+/// ExtraBold 800 for the .heavy roles (the card live line,
+/// the centre LIVE pill — system .heavy in 1.7.4). The
+/// Light/ExtraBold statics are the same Manrope v23
+/// (foundry version 4.505, matching the iOS-verified
+/// files), latin+vietnamese subsets with the Vietnamese
+/// block verified 90/90; their subset-damaged name tables
+/// were repaired to the family's own pattern before
+/// bundling (work-175/GATE-RECORD-175.md).
+enum TVDesignFont {
+    enum Weight {
+        case light, regular, medium, semibold, bold, heavy
+
+        var manropePSName: String {
+            switch self {
+            case .light: return "Manrope-Light"
+            case .regular: return "Manrope-Regular"
+            case .medium: return "Manrope-Medium"
+            case .semibold: return "Manrope-SemiBold"
+            case .bold: return "Manrope-Bold"
+            case .heavy: return "Manrope-ExtraBold"
+            }
+        }
+
+        var systemWeight: Font.Weight {
+            switch self {
+            case .light: return .light
+            case .regular: return .regular
+            case .medium: return .medium
+            case .semibold: return .semibold
+            case .bold: return .bold
+            case .heavy: return .heavy
+            }
+        }
+    }
+
+    static let displayPSName = "BarlowCondensed-ExtraBold"
+
+    /// Display (score digits, the "VS" marks): Barlow
+    /// Condensed 800 — system heavy if unregistered.
+    static func display(_ size: CGFloat) -> Font {
+        if UIFont(name: displayPSName, size: size) != nil {
+            return .custom(displayPSName, size: size)
+        }
+        return .system(size: size, weight: .heavy)
+    }
+
+    /// UI/body: Manrope at the drawn size and weight —
+    /// the system font at the same size/weight if the
+    /// name is unregistered.
+    static func ui(_ size: CGFloat, _ weight: Weight = .regular) -> Font {
+        let name = weight.manropePSName
+        if UIFont(name: name, size: size) != nil {
+            return .custom(name, size: size)
+        }
+        return .system(size: size, weight: weight.systemWeight)
+    }
+}
+
 // MARK: - Picker
 
 /// The full-screen theme picker behind the header's "Giao
@@ -293,6 +375,17 @@ struct TVThemePickerView: View {
     private static func cardID(_ id: TVThemeID) -> String {
         "card:" + id.rawValue
     }
+
+    /// The picker's text face (1.7.5): the pane is painted
+    /// in the CURRENT theme, so while the design theme is
+    /// current its text follows the design type programme;
+    /// under Classic / MU Wally the picker keeps the system
+    /// face exactly as before.
+    private func pfont(_ size: CGFloat,
+                       _ weight: TVDesignFont.Weight = .regular) -> Font {
+        theme.id.isDesign ? TVDesignFont.ui(size, weight)
+                          : .system(size: size, weight: weight.systemWeight)
+    }
     private static let bgRowID = "row:bgchange"
     private static let autoRowID = "row:autorotate"
 
@@ -320,7 +413,7 @@ struct TVThemePickerView: View {
             VStack(alignment: .leading, spacing: 30) {
                 headerRow
                 Text("Giao diện")
-                    .font(.system(size: 40, weight: .bold))
+                    .font(pfont(40, .bold))
                     .foregroundStyle(.white)
                 HStack(spacing: 28) {
                     optionCard(
@@ -354,12 +447,12 @@ struct TVThemePickerView: View {
     private var headerRow: some View {
         ZStack(alignment: .leading) {
             Text("GIAO DIỆN")
-                .font(.system(size: 20, weight: .bold))
+                .font(pfont(20, .bold))
                 .tracking(3)
                 .foregroundStyle(theme.accent)
                 .frame(maxWidth: .infinity, alignment: .center)
             Text("← Quay lại")
-                .font(.system(size: 21, weight: .semibold))
+                .font(pfont(21, .semibold))
                 .foregroundStyle(theme.leagueTx)
         }
     }
@@ -374,28 +467,30 @@ struct TVThemePickerView: View {
             themeStore.select(id)
             dismiss()
         } label: {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
                 previewBlock(id: id, selected: selected)
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.system(size: 28, weight: .bold))
+                        .font(pfont(24, .bold))
                         .foregroundStyle(.white)
                     Text(subtitle)
-                        .font(.system(size: 20))
+                        .font(pfont(16))
                         .foregroundStyle(theme.leagueTx)
                 }
                 .padding(.horizontal, 8)
                 Spacer(minLength: 0)
             }
-            .padding(20)
-            // 1.7.4 (Q6): three equal cards in one row —
-            // (1920 − 2×100 pane padding − 2×28 gaps) / 3 =
-            // 554. The face's outline is the ONLY focus mark;
-            // selection is the preview checkmark alone — the
-            // 1.7.1–1.7.3 build stroked the SELECTED card with
-            // the same ring, so focus and selection were
-            // indistinguishable.
-            .frame(width: 554, height: 300, alignment: .leading)
+            .padding(10)
+            // Q6: three equal cards in one row. 1.7.5: the
+            // card size is the DRAWING's measured ≈415 × 175
+            // (Settings render, PIL — RECALC-DABANH P2); the
+            // 1.7.4 build's 554 × 300 came from dividing the
+            // pane, not from the drawing. The face's outline
+            // is the ONLY focus mark; selection is the
+            // preview checkmark alone — the 1.7.1–1.7.3 build
+            // stroked the SELECTED card with the same ring,
+            // so focus and selection were indistinguishable.
+            .frame(width: 415, height: 175, alignment: .leading)
             .background(pickerCardBackground(focused: focused))
         }
         .tvCardButton()
@@ -432,60 +527,74 @@ struct TVThemePickerView: View {
         }
     }
 
-    /// The card's preview block (height 150): the selected
-    /// check sits at its top-right, in the CURRENT theme's
-    /// focus colour.
+    /// The card's preview block: the drawn ≈55% of the
+    /// card's height — 96 of 175 (RECALC-DABANH P2). The
+    /// card's fixed slots sum inside 175: padding 10 +
+    /// preview 96 + spacing 4 + title block ≈53 + padding
+    /// 10 = 173. The selected check sits at its top-right,
+    /// in the CURRENT theme's focus colour.
     private func previewBlock(id: TVThemeID, selected: Bool) -> some View {
         previewContent(id: id)
             .frame(maxWidth: .infinity)
-            .frame(height: 150)
+            .frame(height: 96)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(alignment: .topTrailing) {
                 if selected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 30))
+                        .font(.system(size: 22))
                         .foregroundStyle(theme.focusRing)
-                        .padding(12)
+                        .padding(8)
                 }
             }
     }
 
     @ViewBuilder
     private func previewContent(id: TVThemeID) -> some View {
-        if id.isMU {
+        if id == .unitedDesign {
             if let url = Wallpapers.images().first {
                 TVMUWallpaperLayer(url: url, dim: 0)
             } else {
                 muSwatchComposition(for: id)
             }
         } else {
-            classicSkeleton
+            // 1.7.5 (RECALC-DABANH P3): the drawing gives
+            // BOTH existing themes the skeleton idiom — the
+            // 1.7.4 build showed the MU Wally card a
+            // wallpaper photo, which is the DESIGN card's
+            // preview, not Wally's.
+            skeletonPreview(for: TVThemeTokens.tokens(for: id))
         }
     }
 
-    /// Classic preview: a navy skeleton composition built
-    /// from the CLASSIC tokens — a boardBG panel carrying
-    /// three tileBG bars (the design's skeleton idiom).
-    private var classicSkeleton: some View {
-        let classic = TVThemeTokens.classic
-        return ZStack {
+    /// Skeleton preview (the design's idiom for the two
+    /// existing themes): a boardBG panel carrying three
+    /// tileBG bars with an accent top rule, built from the
+    /// card's OWN tokens — Classic navy, MU Wally charcoal
+    /// and gold.
+    private func skeletonPreview(for tokens: TVThemeTokens) -> some View {
+        ZStack {
             RoundedRectangle(cornerRadius: 12)
-                .fill(classic.boardBG)
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(Array([CGFloat(170), 250, 130].enumerated()),
+                .fill(tokens.boardBG)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array([CGFloat(150), 220, 115].enumerated()),
                         id: \.offset) { _, width in
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(classic.tileBG)
-                        .frame(width: width, height: 20)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(tokens.tileBG)
+                        .frame(width: width, height: 14)
+                        .overlay(alignment: .top) {
+                            Rectangle()
+                                .fill(tokens.accent)
+                                .frame(height: 2)
+                        }
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(classic.tileBorder,
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(tokens.tileBorder,
                                               lineWidth: 1))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity,
                    alignment: .leading)
-            .padding(20)
+            .padding(12)
         }
     }
 
@@ -523,7 +632,7 @@ struct TVThemePickerView: View {
             ? ((themeStore.bgIndex % count) + count) % count + 1 : 0
         return VStack(alignment: .leading, spacing: 16) {
             Text("Hình nền Manchester United")
-                .font(.system(size: 22, weight: .bold))
+                .font(pfont(22, .bold))
                 .foregroundStyle(.white)
             changeBackgroundRow(count: count, position: position)
             autoRotateRow
@@ -541,10 +650,12 @@ struct TVThemePickerView: View {
                     .foregroundStyle(theme.accent)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Đổi hình nền")
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(pfont(24, .semibold))
                         .foregroundStyle(.white)
-                    Text("Chuyển sang hình nền tiếp theo · \(position)/\(count)")
-                        .font(.system(size: 19))
+                    // 1.7.5 (RECALC-DABANH P6): the drawing's
+                    // counter is zero-padded — "01 / 43".
+                    Text("Chuyển sang hình nền tiếp theo · \(String(format: "%02d", position)) / \(String(format: "%02d", count))")
+                        .font(pfont(19))
                         .foregroundStyle(theme.leagueTx)
                 }
                 Spacer()
@@ -572,10 +683,10 @@ struct TVThemePickerView: View {
             HStack(alignment: .center, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Tự động đổi hình nền")
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(pfont(24, .semibold))
                         .foregroundStyle(.white)
                     Text("Luân phiên mỗi 25 giây · Luôn phủ tối để dễ đọc")
-                        .font(.system(size: 19))
+                        .font(pfont(19))
                         .foregroundStyle(theme.leagueTx)
                 }
                 Spacer()

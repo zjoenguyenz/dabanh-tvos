@@ -36,6 +36,20 @@ targets:
       - DaBanhTV/TVMatchViews.swift
       - DaBanhTV/TVPlayerView.swift
       - DaBanhTV/Assets.xcassets
+      # 1.7.5: the design theme's type programme (owner ruling
+      # 2026-11-22) — Manrope statics for UI/body, Barlow
+      # Condensed 800 for display; the SAME verified files the
+      # iOS build bundles (Vietnamese block 90/90, PostScript
+      # names read from the files' own name tables). Registered
+      # via UIAppFonts below; used ONLY by the design theme's
+      # faces (TVDesignFont in TVTheme.swift).
+      - path: DaBanhTV/Fonts/Manrope-Light.ttf
+      - path: DaBanhTV/Fonts/Manrope-Regular.ttf
+      - path: DaBanhTV/Fonts/Manrope-Medium.ttf
+      - path: DaBanhTV/Fonts/Manrope-SemiBold.ttf
+      - path: DaBanhTV/Fonts/Manrope-Bold.ttf
+      - path: DaBanhTV/Fonts/Manrope-ExtraBold.ttf
+      - path: DaBanhTV/Fonts/BarlowCondensed-ExtraBold.ttf
     dependencies:
       - target: DaBanhTVTopShelf
     settings:
@@ -43,19 +57,27 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.7.4"
-        CURRENT_PROJECT_VERSION: "39"
+        MARKETING_VERSION: "1.7.5"
+        CURRENT_PROJECT_VERSION: "40"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.7.4"
-        CFBundleVersion: "39"
+        CFBundleShortVersionString: "1.7.5"
+        CFBundleVersion: "40"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
             CFBundleIconName: "AppIcon"
+        UIAppFonts:
+          - Manrope-Light.ttf
+          - Manrope-Regular.ttf
+          - Manrope-Medium.ttf
+          - Manrope-SemiBold.ttf
+          - Manrope-Bold.ttf
+          - Manrope-ExtraBold.ttf
+          - BarlowCondensed-ExtraBold.ttf
         UILaunchScreen: {}
   DaBanhTVTopShelf:
     type: app-extension

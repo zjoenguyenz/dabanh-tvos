@@ -1046,20 +1046,31 @@ struct TVScoreDigits: View {
     /// describe, so only the glyph is drawn); the MU board
     /// passes " : " and draws ":".
     var separator: String = " - "
+    /// 1.7.5: the design theme's digits are the programme's
+    /// display face (Barlow Condensed 800 — TVDesignFont).
+    /// Only the design centre (150) and the design board
+    /// (64) pass true; the classic board, the MU Wally board
+    /// and the classic detail keep the system face exactly.
+    var design: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
             Text("\(home)")
-                .font(.system(size: size, weight: .bold))
+                .font(digitFont)
                 .foregroundStyle(.white)
             Text(separator.trimmingCharacters(in: .whitespaces))
-                .font(.system(size: size, weight: .bold))
+                .font(digitFont)
                 .foregroundStyle(theme.dashTx)
             Text("\(away)")
-                .font(.system(size: size, weight: .bold))
+                .font(digitFont)
                 .foregroundStyle(.white)
         }
         .lineLimit(1)
+    }
+
+    private var digitFont: Font {
+        design ? TVDesignFont.display(size)
+               : .system(size: size, weight: .bold)
     }
 }
 
@@ -2349,9 +2360,9 @@ struct TVDesignHeader: View {
                 VStack(alignment: .leading, spacing: 3) {
                     (Text("ĐÁ BANH").foregroundStyle(.white)
                         + Text("TV").foregroundStyle(theme.accent))
-                        .font(.system(size: 34, weight: .bold))
+                        .font(TVDesignFont.ui(34, .bold))
                     Text("MANCHESTER UNITED")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TVDesignFont.ui(12, .semibold))
                         .tracking(3)
                         .foregroundStyle(theme.accent.opacity(0.8))
                         .lineLimit(1)
@@ -2359,10 +2370,10 @@ struct TVDesignHeader: View {
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(TVKickoffFormat.time.string(from: Date()))
-                        .font(.system(size: 30))
+                        .font(TVDesignFont.ui(30))
                         .foregroundStyle(theme.dashTx)
                     Text(TVKickoffFormat.muHeaderDateFormatter.string(from: Date()).uppercased())
-                        .font(.system(size: 13))
+                        .font(TVDesignFont.ui(13))
                         .foregroundStyle(theme.leagueTx)
                 }
             }
@@ -2406,7 +2417,7 @@ struct TVTeamInitialsTile: View {
                         .strokeBorder(theme.accent.opacity(0.45),
                                       lineWidth: 1.5))
             Text(tvTeamInitials(name))
-                .font(.system(size: fontSize, weight: .bold))
+                .font(TVDesignFont.ui(fontSize, .bold))
                 .foregroundStyle(theme.accent)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
@@ -2418,16 +2429,21 @@ struct TVTeamInitialsTile: View {
 
 /// A crest slot under the design theme: the real crest when
 /// one resolved, the initials tile when it did not — the
-/// slot's size never changes (FL-360).
+/// slot's size never changes (FL-360). 1.7.5
+/// (RECALC-DABANH H9): on the Home card the drawn crest ART
+/// is ≈92 while the initials TILE stays ≈80 — `artSize`
+/// separates the two; call sites where the drawing puts
+/// both at one size (board 92, centre 168) leave it nil.
 struct TVDesignCrestSlot: View {
     let url: URL?
     let teamName: String
     let size: CGFloat
     let fontSize: CGFloat
+    var artSize: CGFloat? = nil
 
     var body: some View {
         if let url {
-            TVCrestImage(url: url, size: size)
+            TVCrestImage(url: url, size: artSize ?? size)
         } else {
             TVTeamInitialsTile(name: teamName, size: size, fontSize: fontSize)
         }
@@ -2449,12 +2465,12 @@ struct TVDesignTabFace: View {
     var body: some View {
         ZStack {
             Text(title)
-                .font(.system(size: 25, weight: .bold))
+                .font(TVDesignFont.ui(25, .bold))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
                 .opacity(0)
             Text(title)
-                .font(.system(size: 25, weight: selected ? .semibold : .medium))
+                .font(TVDesignFont.ui(25, selected ? .semibold : .medium))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
                 .foregroundStyle(selected ? .white : theme.leagueTx)
@@ -2493,11 +2509,11 @@ struct TVDesignRailHeader: View {
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Text(title)
-                .font(.system(size: 40, weight: .bold))
+                .font(TVDesignFont.ui(40, .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Text("\(count)")
-                .font(.system(size: 15, weight: .semibold))
+                .font(TVDesignFont.ui(15, .semibold))
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)
                 .padding(.horizontal, 10)
@@ -2509,6 +2525,70 @@ struct TVDesignRailHeader: View {
             Spacer(minLength: 0)
         }
         .frame(height: 50)
+    }
+}
+
+/// The design's FIXED footer bar (1.7.5, RECALC-DABANH
+/// H13/C14): a hairline over a hints line at the left
+/// ("Điều hướng · OK Chọn · ← Quay lại") and the
+/// change-background control at the right as TEXT + icon
+/// with the zero-padded counter ("Đổi hình nền · 01 / 43",
+/// P6) — the drawing's form, not the in-flow pill the
+/// 1.7.4 build ended its scroll with. One construction
+/// shared by the design Home (root, outside the scroll) and
+/// the Match Centre (the centre's last row): the bar never
+/// scrolls. The parents own the wallpaper data and pass
+/// position/count in; the button reports the cycle back.
+/// Focus is the family's gold outline on the button only;
+/// the hints are never focusable.
+struct TVDesignFooterBar: View {
+    @Environment(\.tvTheme) private var theme
+    let position: Int
+    let count: Int
+    var focus: FocusState<String?>.Binding
+    let focusValue: String
+    let onChangeBackground: () -> Void
+
+    private var focused: Bool { focus.wrappedValue == focusValue }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 1)
+            HStack(alignment: .center, spacing: 16) {
+                Text("Điều hướng · OK Chọn · ← Quay lại")
+                    .font(TVDesignFont.ui(17))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if count > 0 {
+                    Button(action: onChangeBackground) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 17))
+                            Text("Đổi hình nền · \(Self.pad(position)) / \(Self.pad(count))")
+                                .font(TVDesignFont.ui(17, .semibold))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .foregroundStyle(focused ? .white : theme.teamTx)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(focused ? theme.focusRing : .clear,
+                                              lineWidth: 2))
+                    }
+                    .tvCardButton()
+                    .focused(focus, equals: focusValue)
+                }
+            }
+        }
+    }
+
+    private static func pad(_ n: Int) -> String {
+        String(format: "%02d", n)
     }
 }
 
@@ -2555,7 +2635,7 @@ struct TVDesignMatchCard: View {
     private var headerRow: some View {
         HStack(alignment: .top, spacing: 12) {
             Text(entry.competitionLabel)
-                .font(.system(size: 15, weight: .bold))
+                .font(TVDesignFont.ui(15, .bold))
                 .tracking(1.5)
                 .foregroundStyle(isGold ? theme.c1Label : theme.leagueTx)
                 .lineLimit(2)
@@ -2569,17 +2649,17 @@ struct TVDesignMatchCard: View {
     private var headerState: some View {
         if entry.isLive {
             Text(liveLine)
-                .font(.system(size: 15, weight: .heavy))
+                .font(TVDesignFont.ui(15, .heavy))
                 .foregroundStyle(theme.minuteRed)
                 .lineLimit(1)
         } else if entry.state?.status == .ft {
             Text("FT")
-                .font(.system(size: 15, weight: .heavy))
+                .font(TVDesignFont.ui(15, .heavy))
                 .foregroundStyle(.white.opacity(0.75))
                 .lineLimit(1)
         } else if entry.state?.status == .postponed || entry.state?.status == .cancelled {
             Text("HOÃN")
-                .font(.system(size: 15, weight: .heavy))
+                .font(TVDesignFont.ui(15, .heavy))
                 .foregroundStyle(.gray)
                 .lineLimit(1)
         }
@@ -2602,14 +2682,18 @@ struct TVDesignMatchCard: View {
         Group {
             if let teams = entry.teams {
                 HStack(alignment: .center, spacing: 0) {
+                    // 1.7.5 (H9): real crest ART at the drawn
+                    // ≈92; the initials tile stays ≈80.
                     TVDesignCrestSlot(url: entry.displayCrests?.0 ?? nil,
-                                      teamName: teams.0, size: 80, fontSize: 28)
+                                      teamName: teams.0, size: 80, fontSize: 28,
+                                      artSize: 92)
                         .frame(width: 92)
                     Spacer(minLength: 0)
                     centreSlot
                     Spacer(minLength: 0)
                     TVDesignCrestSlot(url: entry.displayCrests?.1 ?? nil,
-                                      teamName: teams.1, size: 80, fontSize: 28)
+                                      teamName: teams.1, size: 80, fontSize: 28,
+                                      artSize: 92)
                         .frame(width: 92)
                 }
             } else {
@@ -2624,7 +2708,7 @@ struct TVDesignMatchCard: View {
     private var centreSlot: some View {
         if let state = entry.state, let h = state.scoreHome, let a = state.scoreAway {
             Text("\(h) : \(a)")
-                .font(.system(size: 44, weight: .bold))
+                .font(TVDesignFont.display(44))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -2633,7 +2717,7 @@ struct TVDesignMatchCard: View {
             // The design's upcoming face: "VS" — the kickoff
             // clock lives in the footer, not the centre.
             Text("VS")
-                .font(.system(size: 40, weight: .bold))
+                .font(TVDesignFont.display(40))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .frame(width: 150)
@@ -2647,14 +2731,14 @@ struct TVDesignMatchCard: View {
             if let teams = entry.teams {
                 HStack(alignment: .center, spacing: 0) {
                     Text(teams.0)
-                        .font(.system(size: 24, weight: .bold))
+                        .font(TVDesignFont.ui(24, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
                     Text(teams.1)
-                        .font(.system(size: 24, weight: .bold))
+                        .font(TVDesignFont.ui(24, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
@@ -2662,7 +2746,7 @@ struct TVDesignMatchCard: View {
                 }
             } else {
                 Text(entry.cleanTitle)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(TVDesignFont.ui(22, .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
@@ -2679,7 +2763,7 @@ struct TVDesignMatchCard: View {
     private var footerRow: some View {
         HStack(alignment: .center, spacing: 12) {
             Text(entry.channel.group.isEmpty ? entry.cleanTitle : entry.channel.group)
-                .font(.system(size: 19))
+                .font(TVDesignFont.ui(19))
                 .foregroundStyle(.white.opacity(0.62))
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -2687,7 +2771,7 @@ struct TVDesignMatchCard: View {
                 Text(kickoff > Date()
                      ? TVKickoffFormat.time.string(from: kickoff)
                      : TVKickoffFormat.fullDate.string(from: kickoff))
-                    .font(.system(size: 19))
+                    .font(TVDesignFont.ui(19))
                     .foregroundStyle(.white.opacity(0.62))
                     .lineLimit(1)
             }
