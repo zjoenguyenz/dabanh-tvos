@@ -1072,6 +1072,7 @@ final class NuvioStore: ObservableObject {
 /// channels are German, and the card must not call them
 /// English).
 struct NuvioChannelCard: View {
+    @Environment(\.tvTheme) private var theme
     let item: NuvioItem
     let focused: Bool
     var detailPrefix: String = "Kênh tiếng Anh"
@@ -1113,7 +1114,7 @@ struct NuvioChannelCard: View {
         }
         .padding(22)
         .frame(width: 470, height: 252, alignment: .topLeading)
-        .background(tvCardBackground(focused: focused))
+        .background(tvCardBackground(focused: focused, theme: theme))
     }
 }
 
@@ -1124,6 +1125,7 @@ struct NuvioChannelCard: View {
 /// section's language: red LIVE for a match on air, amber
 /// device-local kickoff for one to come.
 struct NuvioEventCard: View {
+    @Environment(\.tvTheme) private var theme
     let item: NuvioItem
     let focused: Bool
 
@@ -1153,7 +1155,7 @@ struct NuvioEventCard: View {
         }
         .padding(22)
         .frame(width: 470, height: 252, alignment: .topLeading)
-        .background(tvCardBackground(focused: focused))
+        .background(tvCardBackground(focused: focused, theme: theme))
     }
 
     @ViewBuilder

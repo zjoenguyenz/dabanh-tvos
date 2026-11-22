@@ -25,7 +25,10 @@ targets:
       - DaBanh/DivisionClassifier.swift
       - DaBanh/M3UParser.swift
       - DaBanh/PlaylistStore.swift
+      - DaBanh/Wallpapers.swift
+      - wallpapers/wallpapers.json
       - DaBanhTV/DaBanhTVApp.swift
+      - DaBanhTV/TVTheme.swift
       - DaBanhTV/NuvioAddon.swift
       - DaBanhTV/MatchStateStore.swift
       - DaBanhTV/TVContentView.swift
@@ -40,15 +43,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.6.0"
-        CURRENT_PROJECT_VERSION: "34"
+        MARKETING_VERSION: "1.7.0"
+        CURRENT_PROJECT_VERSION: "35"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.6.0"
-        CFBundleVersion: "34"
+        CFBundleShortVersionString: "1.7.0"
+        CFBundleVersion: "35"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

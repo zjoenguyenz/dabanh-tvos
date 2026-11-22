@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 /// TV-native building blocks for the Đá Banh TV redesign (v1.3.0,
 /// 2026-11-14). What is carried over from the iPhone v1.11 redesign
@@ -289,6 +290,7 @@ enum TVPalette {
 /// LIVE · minute / amber ⏰ kickoff (device-local) / grey ↺ PHÁT LẠI
 /// / slate 📺 KÊNH. Same language as the phone, sized for TV.
 struct TVStatusChip: View {
+    @Environment(\.tvTheme) private var theme
     let channel: Channel
     /// Matched live state when the caller has one (1.4.1): the
     /// chip then shows the source's own minute / FT + score
@@ -305,25 +307,25 @@ struct TVStatusChip: View {
         } else if let state, state.status == .live || state.status == .ht {
             HStack(spacing: 7) {
                 Circle()
-                    .fill(TVPalette.liveRed)
+                    .fill(theme.liveRed)
                     .frame(width: 13, height: 13)
                 Text("LIVE · " + (state.badgeText ?? ""))
                     .font(.system(size: 19, weight: .heavy))
-                    .foregroundStyle(TVPalette.liveRed)
+                    .foregroundStyle(theme.liveRed)
             }
         } else if bucket == 0 {
             HStack(spacing: 7) {
                 Circle()
-                    .fill(TVPalette.liveRed)
+                    .fill(theme.liveRed)
                     .frame(width: 13, height: 13)
                 Text("LIVE · \(TVKickoffFormat.liveMinute(of: channel.kickoff ?? now, now: now))'")
                     .font(.system(size: 19, weight: .heavy))
-                    .foregroundStyle(TVPalette.liveRed)
+                    .foregroundStyle(theme.liveRed)
             }
         } else if let kickoff = channel.kickoff, kickoff > now {
             Text("⏰ " + TVKickoffFormat.time.string(from: kickoff))
                 .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(TVPalette.amber)
+                .foregroundStyle(theme.amber)
         } else if channel.kickoff != nil {
             Text("↺ PHÁT LẠI")
                 .font(.system(size: 19, weight: .semibold))
@@ -343,30 +345,30 @@ struct TVStatusChip: View {
 /// not the old white glass — the whole app now reads as ONE
 /// colour family, the board's. Colour tokens only; the shape,
 /// the ring and the geometry are unchanged.
-func tvCardBackground(focused: Bool) -> some View {
+func tvCardBackground(focused: Bool, theme: TVThemeTokens = .classic) -> some View {
     RoundedRectangle(cornerRadius: 22)
         .fill(LinearGradient(
-            colors: [focused ? TVPalette.tileFocusedBG : TVPalette.tileBG,
-                     TVPalette.boardBG],
+            colors: [focused ? theme.tileFocusedBG : theme.tileBG,
+                     theme.boardBG],
             startPoint: .topLeading, endPoint: .bottomTrailing))
         .overlay(
             RoundedRectangle(cornerRadius: 22)
-                .strokeBorder(focused ? TVPalette.cyan : TVPalette.tileBorder,
+                .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
                               lineWidth: focused ? 4 : 1.5))
 }
 
 /// The hero panel's background — the same navy family and the
 /// same focus ring as tvCardBackground, at the hero's larger
 /// corner radius (KH-7).
-func tvHeroBackground(focused: Bool) -> some View {
+func tvHeroBackground(focused: Bool, theme: TVThemeTokens = .classic) -> some View {
     RoundedRectangle(cornerRadius: 26)
         .fill(LinearGradient(
-            colors: [focused ? TVPalette.tileFocusedBG : TVPalette.tileBG,
-                     TVPalette.boardBG],
+            colors: [focused ? theme.tileFocusedBG : theme.tileBG,
+                     theme.boardBG],
             startPoint: .topLeading, endPoint: .bottomTrailing))
         .overlay(
             RoundedRectangle(cornerRadius: 26)
-                .strokeBorder(focused ? TVPalette.cyan : TVPalette.tileBorder,
+                .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
                               lineWidth: focused ? 4 : 1.5))
 }
 
@@ -435,14 +437,65 @@ extension View {
 struct TVPillFace: View {
     let focused: Bool
     let selected: Bool
+    var theme: TVThemeTokens = .classic
+    /// Selection marks (MU red dot + underline) are drawn ONLY
+    /// for tab pills; header action pills pass false (spec:
+    /// showsSelectionMarks true only from tabPill).
+    var showsSelectionMarks: Bool = false
 
     var body: some View {
+        if theme.id.isMU {
+            muBody
+        } else {
+            // Classic branch: today's body verbatim, with the
+            // palette constants re-expressed as their classic
+            // tokens (selectedFill == the classic tealFill,
+            // focusRing == the classic cyan) — classic pixels
+            // are identical.
+            Capsule()
+                .fill(selected ? theme.selectedFill : Color.white.opacity(0.10))
+                .overlay(
+                    Capsule()
+                        .stroke(theme.focusRing, lineWidth: focused ? 4 : 0)
+                        .padding(focused ? -4 : 0))
+        }
+    }
+
+    /// MU pill (spec): white 10% fill idle; selected = white
+    /// 6% fill + white 1.5pt stroke. The red dot lives in a
+    /// FIXED 8pt slot at the leading edge — the slot is always
+    /// reserved when showsSelectionMarks is set and only its
+    /// opacity changes with selection, so the pill's geometry
+    /// never jumps (FL-360). The red underline is an OVERLAY
+    /// only, never in layout flow. Focus is the gold outset
+    /// ring with exactly the classic cyan outset's geometry.
+    private var muBody: some View {
         Capsule()
-            .fill(selected ? TVPalette.tealFill : Color.white.opacity(0.10))
+            .fill(selected ? Color.white.opacity(0.06) : Color.white.opacity(0.10))
             .overlay(
                 Capsule()
-                    .stroke(TVPalette.cyan, lineWidth: focused ? 4 : 0)
+                    .stroke(Color.white, lineWidth: selected ? 1.5 : 0))
+            .overlay(
+                Capsule()
+                    .stroke(theme.focusRing, lineWidth: focused ? 4 : 0)
                     .padding(focused ? -4 : 0))
+            .overlay(alignment: .leading) {
+                if showsSelectionMarks {
+                    Circle()
+                        .fill(theme.unitedRed)
+                        .frame(width: 8, height: 8)
+                        .padding(.leading, 10)
+                        .opacity(selected ? 1 : 0)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showsSelectionMarks && selected {
+                    Capsule()
+                        .fill(theme.unitedRed)
+                        .frame(width: 36, height: 3)
+                        .padding(.bottom, 5)
+                }
+            }
     }
 }
 
@@ -461,7 +514,7 @@ struct TVPillFace: View {
 /// once per launch, and usually once ever. Rendering is
 /// unchanged — same placeholder while loading, same scaledToFit
 /// image when loaded.
-private enum TVImageCache {
+enum TVImageCache {
     // Swift 6: nonisolated(unsafe) — NSCache is thread-safe by design
     // (Apple documents adding, removing and querying items from
     // different threads without locking the cache yourself), and
@@ -483,10 +536,34 @@ private enum TVImageCache {
         cache.setObject(image, forKey: url as NSURL)
         return image
     }
+
+    /// Downsampled load for wallpaper images (spec): some
+    /// wallpapers are 8002px wide and must never be decoded at
+    /// full size, so the decode goes through CGImageSource's
+    /// thumbnail path capped at maxPixel on the longest side.
+    /// The result is cached in the same NSCache as load().
+    static func loadDownsampled(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
+        if let hit = cache.object(forKey: url as NSURL) { return hit }
+        guard maxPixel > 0 else { return await load(url) }
+        guard let (data, _) = try? await session.data(from: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil)
+        else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel.rounded())
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, options as CFDictionary) else { return nil }
+        let image = UIImage(cgImage: cgImage)
+        cache.setObject(image, forKey: url as NSURL)
+        return image
+    }
 }
 
 /// One cached image with the house placeholder while it loads.
-private struct TVCachedImage: View {
+struct TVCachedImage: View {
     let url: URL
     let placeholderSize: CGFloat
     @State private var image: UIImage?
@@ -609,6 +686,7 @@ struct TVChannelLogo: View {
 /// count. One tile per fixture, however many sources carry it.
 struct TVFeaturedCard: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
     @Environment(\.tvTileWidth) private var tileWidth
     let entry: TVFixtureEntry
     let focused: Bool
@@ -620,7 +698,7 @@ struct TVFeaturedCard: View {
                 Text(entry.leagueName.uppercased())
                     .font(.system(size: 21, weight: .bold))
                     .tracking(2)
-                    .foregroundStyle(TVPalette.heroMeta)
+                    .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if entry.sourceCount > 1 {
@@ -671,7 +749,7 @@ struct TVFeaturedCard: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 8)
-                    .background(Capsule().fill(TVPalette.liveRed))
+                    .background(Capsule().fill(theme.liveRed))
                 }
                 if let kickoff = entry.channel.kickoff {
                     Text(TVKickoffFormat.timeDay.string(from: kickoff))
@@ -681,7 +759,7 @@ struct TVFeaturedCard: View {
                 Spacer(minLength: 0)
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 46))
-                    .foregroundStyle(TVPalette.cyan)
+                    .foregroundStyle(theme.focusRing)
             }
         }
         .padding(28)
@@ -701,7 +779,7 @@ struct TVFeaturedCard: View {
         // it is the measured tvTileWidth (capped at this 592),
         // so the row fits the screen the app actually runs on.
         .frame(width: tileWidth, height: 330, alignment: .leading)
-        .background(tvCardBackground(focused: focused))
+        .background(tvCardBackground(focused: focused, theme: theme))
     }
 
     private func teamBlock(name: String, crest: URL?) -> some View {
@@ -740,6 +818,7 @@ struct TVFeaturedCard: View {
 /// the OS platter never fights it (spec §5.2-10).
 struct TVLiveBoardView: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
     @Environment(\.tvTileWidth) private var tileWidth
     let entry: TVFixtureEntry
     let focused: Bool
@@ -755,7 +834,7 @@ struct TVLiveBoardView: View {
                 Text(entry.competitionLabel)
                     .font(.system(size: 19, weight: .bold))
                     .tracking(1)
-                    .foregroundStyle(isGold ? TVPalette.c1Label : TVPalette.leagueTx)
+                    .foregroundStyle(isGold ? theme.c1Label : theme.leagueTx)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 badge
@@ -787,7 +866,7 @@ struct TVLiveBoardView: View {
         // KH-6: the width is the measured tvTileWidth (capped at
         // this 592) — see TVTileWidthKey.
         .frame(width: tileWidth, height: 342, alignment: .topLeading)
-        .background(boardBackground)
+        .background(boardBackground(theme: theme))
     }
 
     private var badge: some View {
@@ -801,7 +880,7 @@ struct TVLiveBoardView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 8)
-                        .fill(isHT ? TVPalette.htAmber : TVPalette.minuteRed))
+                        .fill(isHT ? theme.htAmber : theme.minuteRed))
             } else if entry.state?.status == .postponed || entry.state?.status == .cancelled {
                 Text("HOÃN")
                     .font(.system(size: 25, weight: .bold))
@@ -828,7 +907,7 @@ struct TVLiveBoardView: View {
             TVCrestImage(url: crest, size: 52)
             Text(name ?? entry.cleanTitle)
                 .font(.system(size: 24, weight: .bold))
-                .foregroundStyle(TVPalette.teamTx)
+                .foregroundStyle(theme.teamTx)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         }
@@ -844,7 +923,7 @@ struct TVLiveBoardView: View {
                     .foregroundStyle(.white)
                 Text("-")
                     .font(.system(size: 69, weight: .bold))
-                    .foregroundStyle(TVPalette.dashTx)
+                    .foregroundStyle(theme.dashTx)
                 Text("\(a)")
                     .font(.system(size: 69, weight: .bold))
                     .foregroundStyle(.white)
@@ -863,7 +942,7 @@ struct TVLiveBoardView: View {
     private func eventsBlock(_ state: MatchState) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Rectangle()
-                .fill(TVPalette.eventsLine)
+                .fill(theme.eventsLine)
                 .frame(height: 1)
             HStack(alignment: .top, spacing: 16) {
                 eventColumn(events: state.events.filter { $0.isHome }, alignRight: false)
@@ -878,16 +957,16 @@ struct TVLiveBoardView: View {
                 HStack(spacing: 7) {
                     if event.kind != .goal {
                         RoundedRectangle(cornerRadius: 2.5)
-                            .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
+                            .fill(event.kind == .redCard ? theme.cardR : theme.cardY)
                             .frame(width: 12, height: 16)
                     }
                     Text(event.playerName)
                         .font(.system(size: 19))
-                        .foregroundStyle(TVPalette.evTx)
+                        .foregroundStyle(theme.evTx)
                         .lineLimit(1)
                     Text(event.minuteText)
                         .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(TVPalette.evMin)
+                        .foregroundStyle(theme.evMin)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
@@ -896,14 +975,14 @@ struct TVLiveBoardView: View {
         .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
     }
 
-    private var boardBackground: some View {
+    private func boardBackground(theme: TVThemeTokens) -> some View {
         RoundedRectangle(cornerRadius: 17)
-            .fill(isGold ? TVPalette.c1TileBG : (focused ? TVPalette.tileFocusedBG : TVPalette.tileBG))
+            .fill(isGold ? theme.c1TileBG : (focused ? theme.tileFocusedBG : theme.tileBG))
             .overlay(
                 RoundedRectangle(cornerRadius: 17)
                     .strokeBorder(
-                        focused ? (isGold ? TVPalette.c1Gold : TVPalette.boardSky)
-                                : (isGold ? TVPalette.c1Border : TVPalette.tileBorder),
+                        focused ? (isGold ? theme.c1Gold : theme.accent)
+                                : (isGold ? theme.c1Border : theme.tileBorder),
                         lineWidth: focused ? 4 : 2))
     }
 }
@@ -916,19 +995,30 @@ struct TVLiveBoardView: View {
 /// full-info header. Nothing else rides along: no events, no
 /// meta — the digits are the score, whole.
 struct TVScoreDigits: View {
+    @Environment(\.tvTheme) private var theme
     let home: Int
     let away: Int
+    /// Digit size (1.7.0): default 69 is the classic board
+    /// size, so every existing call site renders unchanged;
+    /// the MU board passes a larger size.
+    var size: CGFloat = 69
+    /// Separator glyph (1.7.0): default " - " draws "-" —
+    /// the classic face exactly (the HStack's 12pt spacing
+    /// already provides the separation the string's spaces
+    /// describe, so only the glyph is drawn); the MU board
+    /// passes " : " and draws ":".
+    var separator: String = " - "
 
     var body: some View {
         HStack(spacing: 12) {
             Text("\(home)")
-                .font(.system(size: 69, weight: .bold))
+                .font(.system(size: size, weight: .bold))
                 .foregroundStyle(.white)
-            Text("-")
-                .font(.system(size: 69, weight: .bold))
-                .foregroundStyle(TVPalette.dashTx)
+            Text(separator.trimmingCharacters(in: .whitespaces))
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(theme.dashTx)
             Text("\(away)")
-                .font(.system(size: 69, weight: .bold))
+                .font(.system(size: size, weight: .bold))
                 .foregroundStyle(.white)
         }
         .lineLimit(1)
@@ -949,12 +1039,13 @@ struct TVScoreDigits: View {
 /// header reserves while a live board's events are still
 /// landing.
 struct TVEventColumns: View {
+    @Environment(\.tvTheme) private var theme
     let state: MatchState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Rectangle()
-                .fill(TVPalette.eventsLine)
+                .fill(theme.eventsLine)
                 .frame(height: 1)
             HStack(alignment: .top, spacing: 16) {
                 eventColumn(events: state.events.filter { $0.isHome },
@@ -977,7 +1068,7 @@ struct TVEventColumns: View {
             if ordered.count > 3 {
                 Text("+\(ordered.count - 3)")
                     .font(.system(size: 19))
-                    .foregroundStyle(TVPalette.evMin)
+                    .foregroundStyle(theme.evMin)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity,
                            alignment: alignRight ? .trailing : .leading)
@@ -990,16 +1081,16 @@ struct TVEventColumns: View {
         HStack(spacing: 7) {
             if event.kind != .goal {
                 RoundedRectangle(cornerRadius: 2.5)
-                    .fill(event.kind == .redCard ? TVPalette.cardR : TVPalette.cardY)
+                    .fill(event.kind == .redCard ? theme.cardR : theme.cardY)
                     .frame(width: 12, height: 16)
             }
             Text(event.playerName)
                 .font(.system(size: 19))
-                .foregroundStyle(TVPalette.evTx)
+                .foregroundStyle(theme.evTx)
                 .lineLimit(1)
             Text(event.minuteText)
                 .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(TVPalette.evMin)
+                .foregroundStyle(theme.evMin)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: alignRight ? .trailing : .leading)
@@ -1016,6 +1107,7 @@ struct TVEventColumns: View {
 /// source), not the rail geometry his remote flow is tuned to.
 struct TVMatchCard: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
     let entry: TVFixtureEntry
     let focused: Bool
 
@@ -1031,7 +1123,7 @@ struct TVMatchCard: View {
             }
             Text(entry.headline)
                 .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(focused ? TVPalette.cyan : .white)
+                .foregroundStyle(focused ? theme.focusRing : .white)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1043,7 +1135,7 @@ struct TVMatchCard: View {
         }
         .padding(22)
         .frame(width: 470, height: 252, alignment: .topLeading)
-        .background(tvCardBackground(focused: focused))
+        .background(tvCardBackground(focused: focused, theme: theme))
     }
 
     private var meta: String {
@@ -1067,6 +1159,7 @@ struct TVMatchCard: View {
 /// hands the player just this channel; there is no fixture ladder
 /// behind a 24/7 channel.
 struct TVENChannelCard: View {
+    @Environment(\.tvTheme) private var theme
     let channel: Channel
     let focused: Bool
 
@@ -1083,14 +1176,14 @@ struct TVENChannelCard: View {
                 Spacer()
                 Text("24/7 · BLV ANH")
                     .font(.system(size: 19, weight: .heavy))
-                    .foregroundStyle(TVPalette.cyan)
+                    .foregroundStyle(theme.focusRing)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(TVPalette.tealFill))
+                    .background(Capsule().fill(theme.selectedFill))
             }
             Text(TVEnglish.displayName(channel))
                 .font(.system(size: 31, weight: .bold))
-                .foregroundStyle(focused ? TVPalette.cyan : .white)
+                .foregroundStyle(focused ? theme.focusRing : .white)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1098,7 +1191,7 @@ struct TVENChannelCard: View {
             HStack(spacing: 10) {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 26))
-                    .foregroundStyle(TVPalette.cyan)
+                    .foregroundStyle(theme.focusRing)
                 Text("Kênh tiếng Anh · phát liên tục")
                     .font(.system(size: 20))
                     .foregroundStyle(.white.opacity(0.62))
@@ -1107,7 +1200,7 @@ struct TVENChannelCard: View {
         }
         .padding(22)
         .frame(width: 470, height: 252, alignment: .topLeading)
-        .background(tvCardBackground(focused: focused))
+        .background(tvCardBackground(focused: focused, theme: theme))
     }
 }
 

@@ -442,6 +442,7 @@ final class DiagLogServer {
 /// element, not a theme surface.
 struct TVLogView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.tvTheme) private var theme
     @State private var server = DiagLogServer()
     @State private var serverState: DiagLogServer.State = .starting
     @State private var logText: String = ""
@@ -465,7 +466,7 @@ struct TVLogView: View {
                             .padding(.horizontal, 26)
                             .padding(.vertical, 10)
                             .background(TVPillFace(focused: closeFocused,
-                                                   selected: false))
+                                                   selected: false, theme: theme))
                     }
                     .tvCardButton()
                     .focused($closeFocused)

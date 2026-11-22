@@ -38,6 +38,7 @@ struct TVSwitchContext {
 /// overlay is up.
 struct TVPlayerView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.tvTheme) private var theme
     @State private var activeResolution: MatchResolution
     @State private var session = 0
     @State private var playingURL: String?
@@ -184,10 +185,10 @@ struct TVPlayerView: View {
             .frame(width: 1160)
             .background(
                 RoundedRectangle(cornerRadius: 22)
-                    .fill(TVPalette.boardBG)
+                    .fill(theme.boardBG)
                     .overlay(
                         RoundedRectangle(cornerRadius: 22)
-                            .strokeBorder(TVPalette.tileBorder, lineWidth: 2)))
+                            .strokeBorder(theme.tileBorder, lineWidth: 2)))
         }
     }
 
@@ -204,7 +205,8 @@ struct TVPlayerView: View {
                                   detail: ch.group,
                                   playing: activeENItemID == nil
                                       && playingURL == ch.url,
-                                  focused: switchFocus == "vn:" + ch.url)
+                                  focused: switchFocus == "vn:" + ch.url,
+                                  theme: theme)
                 }
                 .tvCardButton()
                 .focused($switchFocus, equals: "vn:" + ch.url)
@@ -225,7 +227,8 @@ struct TVPlayerView: View {
                                   detail: item.league != nil
                                       ? item.displayName : "Nuvio",
                                   playing: activeENItemID == item.id,
-                                  focused: switchFocus == "nv:" + item.id)
+                                  focused: switchFocus == "nv:" + item.id,
+                                  theme: theme)
                 }
                 .tvCardButton()
                 .focused($switchFocus, equals: "nv:" + item.id)
@@ -237,16 +240,17 @@ struct TVPlayerView: View {
     /// carries a check and "(đang phát)" so the eye lands on it
     /// before focus even moves.
     private func switchRowFace(title: String, detail: String,
-                               playing: Bool, focused: Bool) -> some View {
+                               playing: Bool, focused: Bool,
+                               theme: TVThemeTokens) -> some View {
         HStack(spacing: 16) {
             Image(systemName: playing ? "checkmark.circle.fill" : "play.circle.fill")
                 .font(.system(size: 28))
                 .foregroundStyle(playing || focused
-                    ? TVPalette.boardSky : .white.opacity(0.5))
+                    ? theme.accent : .white.opacity(0.5))
             VStack(alignment: .leading, spacing: 3) {
                 Text(playing ? title + "  (đang phát)" : title)
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(focused ? TVPalette.boardSky : .white)
+                    .foregroundStyle(focused ? theme.accent : .white)
                     .lineLimit(1)
                 if !detail.isEmpty {
                     Text(detail)
@@ -261,10 +265,10 @@ struct TVPlayerView: View {
         .padding(.vertical, 14)
         .background(
             RoundedRectangle(cornerRadius: 14)
-                .fill(focused ? TVPalette.tileFocusedBG : TVPalette.tileBG)
+                .fill(focused ? theme.tileFocusedBG : theme.tileBG)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(focused ? TVPalette.boardSky : TVPalette.tileBorder,
+                        .strokeBorder(focused ? theme.accent : theme.tileBorder,
                                       lineWidth: focused ? 3 : 1.5)))
     }
 
@@ -312,6 +316,7 @@ struct TVPlayerView: View {
 /// loading capsule for later-verified rungs, exactly as it waits
 /// for the first batch.
 private struct PlayerSurface: View {
+    @Environment(\.tvTheme) private var theme
     @ObservedObject var resolution: MatchResolution
     /// The shell's switch hooks (v1.4.1, 2.22 parity): the
     /// switch button is installed only for board-launched
@@ -405,7 +410,9 @@ private struct PlayerSurface: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 8)
-                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                    .background(Capsule().fill(theme.id.isMU
+                        ? theme.tileBG.opacity(0.9)
+                        : Color.black.opacity(0.55)))
                 Spacer()
             }
             .padding(.leading, 48)
@@ -519,7 +526,8 @@ private struct PlayerSurface: View {
 
     private var noSignal: some View {
         ZStack {
-            Color(red: 0.05, green: 0.07, blue: 0.08).ignoresSafeArea()
+            (theme.id.isMU ? theme.boardBG
+                : Color(red: 0.05, green: 0.07, blue: 0.08)).ignoresSafeArea()
             VStack(spacing: 18) {
                 Text("MẤT TÍN HIỆU")
                     .font(.system(size: 54, weight: .bold))
@@ -558,6 +566,7 @@ private struct PlayerSurface: View {
 /// construction), EN rows resolve through the addon store.
 struct TVMatchBoardView: View {
     @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
     let entry: TVFixtureEntry
     let vnSources: [Channel]
     let enItems: [NuvioItem]
@@ -579,23 +588,12 @@ struct TVMatchBoardView: View {
     }
 
     var body: some View {
-        ZStack {
-            TVPalette.boardBG.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 26) {
-                header
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 30) {
-                        vnSection
-                        if !enItems.isEmpty {
-                            enSection
-                        }
-                    }
-                    .padding(.bottom, 10)
-                }
+        Group {
+            if theme.id.isMU {
+                muBoard
+            } else {
+                classicBoard
             }
-            .padding(.horizontal, 60)
-            .padding(.top, 40)
-            .padding(.bottom, 28)
         }
         .onExitCommand { dismiss() }
         .onAppear {
@@ -624,7 +622,313 @@ struct TVMatchBoardView: View {
                     initialVNURL: request.vnURL,
                     makeVNResolution: { store.resolution(for: $0) },
                     makeENResolution: { nuvio.resolution(for: $0) }))
+                .environment(\.tvTheme, theme)
         }
+    }
+
+    /// Classic board — the 1.6.0 code path verbatim (only the
+    /// palette constants are read through the theme tokens,
+    /// whose classic values ARE those constants).
+    private var classicBoard: some View {
+        ZStack {
+            theme.boardBG.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 26) {
+                header
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 30) {
+                        vnSection
+                        if !enItems.isEmpty {
+                            enSection
+                        }
+                    }
+                    .padding(.bottom, 10)
+                }
+            }
+            .padding(.horizontal, 60)
+            .padding(.top, 40)
+            .padding(.bottom, 28)
+        }
+    }
+
+    // MARK: MU board (1.7.0 — IMPL-SPEC TVPlayerView section)
+
+    private var muBoard: some View {
+        ZStack {
+            theme.boardBG.ignoresSafeArea()
+            LinearGradient(
+                colors: [theme.unitedRed.opacity(0.16), theme.boardBG, .black],
+                startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 26) {
+                muTopBar
+                HStack(alignment: .top, spacing: 44) {
+                    muLeftColumn
+                    muRightColumn
+                }
+                timelineBand
+            }
+            .padding(.horizontal, 60)
+            .padding(.top, 40)
+            .padding(.bottom, 28)
+        }
+    }
+
+    private var muTopBar: some View {
+        HStack(alignment: .center, spacing: 14) {
+            // Non-focusable label — Menu is the real exit
+            // (.onExitCommand on the board, unchanged).
+            Text("← Tất cả trận")
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundStyle(theme.leagueTx)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("CHI TIẾT TRẬN")
+                .font(.system(size: 24, weight: .bold))
+                .tracking(2)
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            // Existing badge face, MU colours via tokens.
+            if let badge = liveEntry.badgeText {
+                Text(badge)
+                    .font(.system(size: 25, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(liveEntry.state?.status == .ht
+                            ? theme.htAmber : theme.minuteRed))
+            }
+        }
+        .frame(height: 39)
+    }
+
+    private var muLeftColumn: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(entry.competitionLabel)
+                .font(.system(size: 19, weight: .bold))
+                .tracking(1)
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            if let teams = liveEntry.teams {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(teams.0)
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text("VS")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(theme.dashTx)
+                    Text(teams.1)
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                }
+            } else {
+                Text(liveEntry.headline)
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+            }
+            // Crest pair (120) flanking the score. FL-360: the
+            // score slot height is FIXED (132 = the size-110
+            // digits' height) in every state — with a score,
+            // without a score, live or not — so nothing below
+            // ever moves when the score lands.
+            HStack(alignment: .center, spacing: 28) {
+                if let crests = liveEntry.displayCrests {
+                    TVCrestImage(url: crests.0, size: 120)
+                }
+                Group {
+                    if let state = liveEntry.state,
+                       let home = state.scoreHome, let away = state.scoreAway {
+                        TVScoreDigits(home: home, away: away,
+                                      size: 110, separator: " : ")
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: 132)
+                if let crests = liveEntry.displayCrests {
+                    TVCrestImage(url: crests.1, size: 120)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: 132)
+            // 1.7.0 fix round 1 (FL-360): the LIVE/badge row's
+            // container is ALWAYS rendered at a FIXED height
+            // of 32 pt in every state (empty = clear), so a
+            // badge appearing never shifts the column below.
+            // 32 pt = the row's tallest current content: the
+            // LIVE capsule — 20 pt text (≈24 pt line) + 4 + 4
+            // vertical padding = 32 — which covers the 24 pt
+            // badge/minute text (≈29 pt line) in the other
+            // states.
+            Group {
+                if liveEntry.isLive {
+                    HStack(spacing: 12) {
+                        Text("LIVE")
+                            .font(.system(size: 20, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(theme.liveRed))
+                        if let minute = liveEntry.state?.minuteText {
+                            Text(minute)
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(theme.accent)
+                        }
+                    }
+                } else if let badge = liveEntry.badgeText {
+                    Text(badge)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(theme.accent)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(height: 32)
+            if let state = liveEntry.state {
+                if !state.events.isEmpty {
+                    TVEventColumns(state: state)
+                } else if state.status == .live || state.status == .ht {
+                    // Classic reservation rule: a live board
+                    // whose events have not landed reserves the
+                    // event columns' fullest height (121).
+                    Color.clear
+                        .frame(height: 121)
+                }
+            }
+            if !(vnSources.isEmpty && enItems.isEmpty) {
+                muWatchButton
+                Text("Nguồn tiếng Việt được xếp trước · đổi nguồn ngay trong lúc xem")
+                    .font(.system(size: 19))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(2)
+            }
+            // NO Follow button, NO venue block (SURVEY-B register
+            // items 1 / spec): no such feature / datum exists.
+        }
+        .frame(width: 560, alignment: .leading)
+    }
+
+    /// The Watch button: its action is EXACTLY the first source
+    /// row's action (VN first if any, else the first EN item),
+    /// building the same BoardPlayRequest that row builds. The
+    /// button is omitted by the caller when both lists are empty.
+    @ViewBuilder
+    private var muWatchButton: some View {
+        let total = vnSources.count + enItems.count
+        let focused = focusedRow == "mu:watch"
+        Button {
+            if let ch = vnSources.first {
+                playRequest = BoardPlayRequest(
+                    resolution: store.resolution(for: ch), enItemID: nil,
+                    vnURL: ch.url)
+            } else if let item = enItems.first {
+                playRequest = BoardPlayRequest(
+                    resolution: nuvio.resolution(for: item), enItemID: item.id,
+                    vnURL: nil)
+            }
+        } label: {
+            Text("▶ Xem ngay · \(total) nguồn")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 30)
+                .padding(.vertical, 16)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(LinearGradient(
+                            colors: [theme.unitedRed, theme.minuteRed],
+                            startPoint: .leading, endPoint: .trailing))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .strokeBorder(focused ? theme.focusRing : .clear,
+                                              lineWidth: 3)))
+        }
+        .tvCardButton()
+        .focused($focusedRow, equals: "mu:watch")
+    }
+
+    private var muRightColumn: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 30) {
+                vnSection
+                if !enItems.isEmpty {
+                    enSection
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// First integer run of a minute text ("45'+3'" -> 45,
+    /// "61'" -> 61); nil when the text carries no leading
+    /// minute — the caller then draws nothing for it (never
+    /// fabricates a position).
+    private static func parsedMinute(_ text: String?) -> Int? {
+        guard let text else { return nil }
+        let digits = text.prefix(while: { $0.isNumber })
+        guard !digits.isEmpty else { return nil }
+        return Int(digits)
+    }
+
+    /// FIXED 54 pt slot, always present under MU (FL-360).
+    /// Track + end labels always; the progress portion and the
+    /// event dots come only from real parsed minutes.
+    private var timelineBand: some View {
+        let state = liveEntry.state
+        let liveMinute = Self.parsedMinute(state?.minuteText)
+        return VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(theme.eventsLine)
+                        .frame(height: 3)
+                    if let liveMinute {
+                        Rectangle()
+                            .fill(theme.unitedRed)
+                            .frame(width: geo.size.width
+                                * CGFloat(min(max(liveMinute, 0), 90)) / 90,
+                                   height: 3)
+                    }
+                    if let state {
+                        ForEach(Array(state.events.enumerated()), id: \.offset) { _, event in
+                            if let minute = Self.parsedMinute(event.minuteText) {
+                                let x = geo.size.width
+                                    * CGFloat(min(max(minute, 0), 90)) / 90
+                                Group {
+                                    if event.kind == .goal {
+                                        Circle()
+                                            .fill(theme.accent)
+                                            .frame(width: 11, height: 11)
+                                    } else {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(event.kind == .redCard
+                                                ? theme.cardR : theme.cardY)
+                                            .frame(width: 8, height: 12)
+                                    }
+                                }
+                                .position(x: x, y: geo.size.height / 2)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(height: 20)
+            HStack {
+                Text("0'")
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.leagueTx)
+                Spacer(minLength: 0)
+                Text("90'")
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.leagueTx)
+            }
+        }
+        .frame(height: 54)
     }
 
     // MARK: Header (the full cluster, §2.4 as amended 2026-11-21)
@@ -672,7 +976,7 @@ struct TVMatchBoardView: View {
                 Text(entry.competitionLabel)
                     .font(.system(size: 19, weight: .bold))
                     .tracking(1)
-                    .foregroundStyle(TVPalette.leagueTx)
+                    .foregroundStyle(theme.leagueTx)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if let badge = liveEntry.badgeText {
@@ -683,7 +987,7 @@ struct TVMatchBoardView: View {
                         .padding(.vertical, 4)
                         .background(RoundedRectangle(cornerRadius: 8)
                             .fill(liveEntry.state?.status == .ht
-                                ? TVPalette.htAmber : TVPalette.minuteRed))
+                                ? theme.htAmber : theme.minuteRed))
                 }
             }
             // 1.4.9 (FL-360, audit S-4): the first row holds the
@@ -706,7 +1010,7 @@ struct TVMatchBoardView: View {
                 if let kickoff = entry.channel.kickoff {
                     Text(TVKickoffFormat.timeDay.string(from: kickoff))
                         .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(TVPalette.boardSky)
+                        .foregroundStyle(theme.accent)
                         .lineLimit(1)
                 }
             }
@@ -793,7 +1097,9 @@ struct TVMatchBoardView: View {
                 } label: {
                     rowFace(title: MatchTitle.clean(ch.title),
                             detail: ch.group,
-                            focused: focusedRow == "vn:" + ch.url)
+                            focused: focusedRow == "vn:" + ch.url,
+                            theme: theme,
+                            logoChannel: ch)
                 }
                 .tvCardButton()
                 .focused($focusedRow, equals: "vn:" + ch.url)
@@ -814,7 +1120,14 @@ struct TVMatchBoardView: View {
                 } label: {
                     rowFace(title: item.league ?? item.displayName,
                             detail: item.league != nil ? item.displayName : "Nuvio",
-                            focused: focusedRow == "nv:" + item.id)
+                            focused: focusedRow == "nv:" + item.id,
+                            theme: theme,
+                            // NuvioItem exposes a logo via `poster`
+                            // (and via displayChannel, which wraps
+                            // poster as the channel logo — see
+                            // NuvioAddon.swift): chip only when a
+                            // poster URL actually exists.
+                            logoChannel: item.poster.isEmpty ? nil : item.displayChannel)
                 }
                 .tvCardButton()
                 .focused($focusedRow, equals: "nv:" + item.id)
@@ -822,15 +1135,25 @@ struct TVMatchBoardView: View {
         }
     }
 
-    private func rowFace(title: String, detail: String, focused: Bool) -> some View {
+    private func rowFace(title: String, detail: String, focused: Bool,
+                         theme: TVThemeTokens,
+                         logoChannel: Channel? = nil) -> some View {
         HStack(spacing: 16) {
+            // MU only: channel logo chip at the row's left, only
+            // when a logo actually exists (SURVEY-B register
+            // item 4). Classic rows never carry the chip — the
+            // classic face below is today's face verbatim.
+            // NO quality pill, NO signal bars (register 2-3).
+            if theme.id.isMU, let logoChannel, logoChannel.logoURL != nil {
+                TVChannelLogo(channel: logoChannel, height: 40)
+            }
             Image(systemName: "play.circle.fill")
                 .font(.system(size: 28))
-                .foregroundStyle(focused ? TVPalette.boardSky : .white.opacity(0.5))
+                .foregroundStyle(focused ? theme.accent : .white.opacity(0.5))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(focused ? TVPalette.boardSky : .white)
+                    .foregroundStyle(focused ? theme.accent : .white)
                     .lineLimit(1)
                 if !detail.isEmpty {
                     Text(detail)
@@ -843,13 +1166,36 @@ struct TVMatchBoardView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
-        .background(
+        .background(rowFaceBackground(focused: focused, theme: theme))
+    }
+
+    @ViewBuilder
+    private func rowFaceBackground(focused: Bool, theme: TVThemeTokens) -> some View {
+        if theme.id.isMU {
+            // MU: charcoal fill; focused = maroon gradient +
+            // gold 3 pt stroke (one owner of the silhouette —
+            // the rounded rect below — as on classic).
             RoundedRectangle(cornerRadius: 14)
-                .fill(focused ? TVPalette.tileFocusedBG : TVPalette.tileBG)
+                .fill(focused
+                    ? AnyShapeStyle(LinearGradient(
+                        colors: [theme.tileFocusedBG, theme.minuteRed.opacity(0.35)],
+                        startPoint: .leading, endPoint: .trailing))
+                    : AnyShapeStyle(theme.tileBG))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(focused ? TVPalette.boardSky : TVPalette.tileBorder,
-                                      lineWidth: focused ? 3 : 1.5)))
+                        .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
+                                      lineWidth: focused ? 3 : 1.5))
+        } else {
+            // Classic: today's face verbatim (theme.accent is
+            // TVPalette.boardSky and the tile tokens are the
+            // TVPalette tile constants under classic).
+            RoundedRectangle(cornerRadius: 14)
+                .fill(focused ? theme.tileFocusedBG : theme.tileBG)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(focused ? theme.accent : theme.tileBorder,
+                                      lineWidth: focused ? 3 : 1.5))
+        }
     }
 }
 

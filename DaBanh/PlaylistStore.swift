@@ -72,6 +72,9 @@ final class PlaylistStore: ObservableObject {
     /// Bumped when the crest map is swapped for a fresher remote copy,
     /// so crest-reading views re-render with the new badges.
     @Published private(set) var crestsRevision = 0
+    /// Bumped when the wallpaper list is swapped for a fresher
+    /// remote copy, so wallpaper-reading views re-render.
+    @Published private(set) var wallpaperRevision = 0
     /// Live match states (1.4.1, plan §1): ESPN > FotMob >
     /// Flashscore > LiveScore > computed clock. Owned here; views read states
     /// through matchState(for:) / competition(for:), never the
@@ -164,6 +167,9 @@ final class PlaylistStore: ObservableObject {
         // playlist: fetch once per launch, swap in if fresher.
         Task {
             if await Crests.refreshRemote() { crestsRevision += 1 }
+        }
+        Task {
+            if await Wallpapers.refreshRemote() { wallpaperRevision += 1 }
         }
         guard autoRefreshTask == nil else { return }
         autoRefreshTask = Task { [weak self] in

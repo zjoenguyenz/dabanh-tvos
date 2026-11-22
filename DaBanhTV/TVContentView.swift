@@ -38,6 +38,18 @@ struct TVContentView: View {
     /// The PlaylistStore fixture lists never see it, so addon
     /// content cannot leak into them.
     @StateObject private var nuvio = NuvioStore()
+    /// 1.7.0: the theme store — owned HERE, at the root, and
+    /// nowhere else. Its tokens are injected into the
+    /// environment for the whole tree (and re-injected into
+    /// every fullScreenCover, which starts a fresh environment
+    /// chain); the store object itself goes to the surfaces
+    /// that ACT on it (the footer's background cycler, the
+    /// theme picker). Classic is the default and the classic
+    /// tokens ARE the 1.6.0 constants, so the classic render
+    /// is unchanged by construction.
+    @StateObject private var themeStore = TVThemeStore()
+    /// The theme picker cover ("Giao diện" pill, tabBar row 2).
+    @State private var themeOpen = false
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
     /// The open fixture's link board (1.4.1, spec §2): a fixture
@@ -67,6 +79,13 @@ struct TVContentView: View {
     /// only this view ever writes or reads it (each app owns its
     /// store instance, so the phone never sees it).
     private static let enTabValue = -2
+
+    /// The CURRENT theme's tokens, read straight from the
+    /// owned store (this view injects the same value into the
+    /// environment for its children; a view's own environment
+    /// reads come from its parent, so the root reads the store
+    /// directly).
+    private var theme: TVThemeTokens { themeStore.tokens }
 
     private struct PlayRequest: Identifiable {
         let id = UUID()
@@ -501,6 +520,8 @@ struct TVContentView: View {
             .padding(.bottom, 0)
         }
         .environment(\.tvTileWidth, tileWidth)
+        .environment(\.tvTheme, themeStore.tokens)
+        .environmentObject(themeStore)
         .task {
             DiagLog.logSessionStart()
             await store.start()
@@ -550,15 +571,24 @@ struct TVContentView: View {
         }
         .fullScreenCover(item: $playRequest) { request in
             TVPlayerView(resolution: request.resolution)
+                .environment(\.tvTheme, themeStore.tokens)
         }
         .fullScreenCover(item: $boardRequest) { request in
             TVMatchBoardView(entry: request.entry,
                              vnSources: request.vnSources,
                              enItems: request.enItems,
                              nuvio: nuvio)
+                .environment(\.tvTheme, themeStore.tokens)
+                .environmentObject(themeStore)
         }
         .fullScreenCover(isPresented: $logOpen) {
             TVLogView()
+                .environment(\.tvTheme, themeStore.tokens)
+        }
+        .fullScreenCover(isPresented: $themeOpen) {
+            TVThemePickerView()
+                .environment(\.tvTheme, themeStore.tokens)
+                .environmentObject(themeStore)
         }
         // KH-2: every DATA input rebuilds the snapshot (and
         // re-validates the hero); focus changes never reach
@@ -677,18 +707,56 @@ struct TVContentView: View {
 
     // MARK: - Chrome
 
+    @ViewBuilder
     private var background: some View {
-        // KH-7 (ĐG-4): navy, derived from the scoreboard's
-        // boardBG — the screen background and the tiles are one
-        // colour family now (was a teal-green gradient from the
-        // app's first design, which read as a second, different
-        // blue next to the navy boards in the owner's photos).
-        LinearGradient(
-            colors: [Color(red: 0.055, green: 0.09, blue: 0.17),
-                     TVPalette.boardBG,
-                     Color(red: 0.02, green: 0.035, blue: 0.07)],
-            startPoint: .topLeading, endPoint: .bottomTrailing)
-            .ignoresSafeArea()
+        if theme.id.isMU {
+            muBackground
+        } else {
+            // KH-7 (ĐG-4): navy, derived from the scoreboard's
+            // boardBG — the screen background and the tiles are one
+            // colour family now (was a teal-green gradient from the
+            // app's first design, which read as a second, different
+            // blue next to the navy boards in the owner's photos).
+            LinearGradient(
+                colors: [Color(red: 0.055, green: 0.09, blue: 0.17),
+                         TVPalette.boardBG,
+                         Color(red: 0.02, green: 0.035, blue: 0.07)],
+                startPoint: .topLeading, endPoint: .bottomTrailing)
+                .ignoresSafeArea()
+        }
+    }
+
+    /// The current MU wallpaper, if any: the shared list in
+    /// file order, indexed by the persisted choice. Empty list
+    /// → nil (gradient only, fail-open like every other remote
+    /// list in this app).
+    private var currentWallpaperURL: URL? {
+        let images = Wallpapers.images()
+        guard !images.isEmpty else { return nil }
+        let count = images.count
+        return images[((themeStore.bgIndex % count) + count) % count]
+    }
+
+    /// 1.7.0 MU background: the theme's token gradient UNDER a
+    /// full-bleed wallpaper photo with the design's heavy dark
+    /// scrim over it. FL-128: this view reads NO focus state —
+    /// it re-renders only when the theme, the chosen index or
+    /// the remote list's revision changes, never on a focus
+    /// step.
+    private var muBackground: some View {
+        // A remote wallpaper refresh bumps this revision; the
+        // read is what re-runs this view (and only this view)
+        // when the list lands.
+        let _ = store.wallpaperRevision
+        return ZStack {
+            LinearGradient(
+                colors: [theme.bgTop, theme.bgMid, theme.bgBottom],
+                startPoint: .top, endPoint: .bottom)
+            if let url = currentWallpaperURL {
+                TVWallpaperView(url: url)
+            }
+        }
+        .ignoresSafeArea()
     }
 
     /// Compact header (1.4.1, spec §0/§5.2-6): ONE row — small
@@ -697,28 +765,74 @@ struct TVContentView: View {
     /// their pill-row place directly beneath (their focus-travel
     /// position is load-bearing since v1.2.7 — see tabBar); the
     /// old 56-pt two-line brand block is gone.
+    @ViewBuilder
     private var header: some View {
-        HStack(alignment: .center, spacing: 18) {
-            Text("⚽")
-                .font(.system(size: 30))
-            HStack(spacing: 8) {
-                Text("ĐÁ BANH")
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(.white)
-                Text("TV")
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(TVPalette.boardSky)
+        if theme.id.isMU {
+            muHeader
+        } else {
+            HStack(alignment: .center, spacing: 18) {
+                Text("⚽")
+                    .font(.system(size: 30))
+                HStack(spacing: 8) {
+                    Text("ĐÁ BANH")
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("TV")
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(TVPalette.boardSky)
+                }
+                Spacer()
+                Text(TVKickoffFormat.time.string(from: Date()))
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color(red: 0.388, green: 0.463, blue: 0.604))
+                Text("dabanh.tv")
+                    .font(.system(size: 20))
+                    .foregroundStyle(TVPalette.leagueTx)
             }
-            Spacer()
-            Text(TVKickoffFormat.time.string(from: Date()))
-                .font(.system(size: 20))
-                .foregroundStyle(Color(red: 0.388, green: 0.463, blue: 0.604))
-            Text("dabanh.tv")
-                .font(.system(size: 20))
-                .foregroundStyle(TVPalette.leagueTx)
+            // 1.5.1 (FL-360): the 4 pt bottom pad is reclaimed —
+            // the root VStack spacing separates the rows now.
         }
-        // 1.5.1 (FL-360): the 4 pt bottom pad is reclaimed —
-        // the root VStack spacing separates the rows now.
+    }
+
+    /// 1.7.0 MU header (design): ONE row at the classic row's
+    /// height family — club crest + the two-colour UNITEDTV
+    /// wordmark and its tagline on the left, the Theatre of
+    /// Dreams line centred in gold caps, and the app's existing
+    /// clock / dabanh.tv block on the right, recoloured by the
+    /// theme tokens only (same real clock, same texts).
+    private var muHeader: some View {
+        // 1.7.0 fix round 1: the Theatre of Dreams line is
+        // centred on the SCREEN — the HStack (left block,
+        // Spacer, clock block) sits underneath in a ZStack
+        // and the centre Text is centred across the full
+        // width on top. No focusables are in the header.
+        ZStack {
+            HStack(alignment: .center, spacing: 18) {
+                HStack(alignment: .center, spacing: 14) {
+                    TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 44)
+                    VStack(alignment: .leading, spacing: 2) {
+                        (Text("UNITED").foregroundStyle(.white)
+                            + Text("TV").foregroundStyle(theme.accent))
+                            .font(.system(size: 30, weight: .bold))
+                        Text("THE MATCH. THE MOMENT. UNITED.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.leagueTx)
+                            .tracking(2)
+                    }
+                }
+                Spacer()
+                Text(TVKickoffFormat.time.string(from: Date()))
+                    .font(.system(size: 20))
+                    .foregroundStyle(theme.dashTx)
+                Text("dabanh.tv")
+                    .font(.system(size: 20))
+                    .foregroundStyle(theme.leagueTx)
+            }
+            Text("◆ THE THEATRE OF DREAMS ◆")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .tracking(2)
+        }
     }
 
     private var countText: String {
@@ -795,7 +909,7 @@ struct TVContentView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:refresh",
-                                           selected: false))
+                                           selected: false, theme: theme))
                 }
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:refresh")
@@ -816,7 +930,7 @@ struct TVContentView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:check",
-                                           selected: false))
+                                           selected: false, theme: theme))
                 }
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:check")
@@ -837,10 +951,32 @@ struct TVContentView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:log",
-                                           selected: false))
+                                           selected: false, theme: theme))
                 }
                 .tvCardButton()
                 .focused($focusedKey, equals: "hdr:log")
+                // 1.7.0: the theme picker's door — the feature's
+                // entry point, present under BOTH themes (it is
+                // how the owner reaches MU, so the classic bar
+                // gains this one pill and nothing else). Same
+                // metrics as the other action pills.
+                Button {
+                    themeOpen = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "paintpalette")
+                        Text("Giao diện")
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .font(.system(size: 20, weight: .medium))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(TVPillFace(focused: focusedKey == "hdr:theme",
+                                           selected: false, theme: theme))
+                }
+                .tvCardButton()
+                .focused($focusedKey, equals: "hdr:theme")
             }
         }
     }
@@ -865,15 +1001,42 @@ struct TVContentView: View {
         return Button {
             store.selectedLeague = value
         } label: {
-            Text(title)
-                .font(.system(size: 20, weight: .medium))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+            if theme.id.isMU {
+                // 1.7.0 fix round 1 (FL-360): under MU the
+                // selected label is WHITE BOLD and the pill's
+                // width is reserved at the BOLD width in both
+                // states — a hidden bold copy sizes the ZStack
+                // and the visible copy is overlaid centred, so
+                // selection never changes the pill's width.
+                ZStack {
+                    Text(title)
+                        .font(.system(size: 20, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .opacity(0)
+                    Text(title)
+                        .font(.system(size: 20, weight: selected ? .bold : .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(selected ? .white : theme.leagueTx)
+                }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
                 .background(TVPillFace(focused: focusedKey == "pill:\(value)",
-                                       selected: selected))
-                .foregroundStyle(.white)
+                                       selected: selected, theme: theme,
+                                       showsSelectionMarks: true))
+            } else {
+                Text(title)
+                    .font(.system(size: 20, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(TVPillFace(focused: focusedKey == "pill:\(value)",
+                                           selected: selected, theme: theme,
+                                           showsSelectionMarks: true))
+                    .foregroundStyle(.white)
+            }
         }
         .tvCardButton()
         .focused($focusedKey, equals: "pill:\(value)")
@@ -1140,6 +1303,34 @@ struct TVContentView: View {
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
             Spacer()
+            // 1.7.0 MU only: the Change-background control —
+            // cycles the shared wallpaper list (choice persists
+            // in the theme store) with a counter instead of 35
+            // position dots. Rendered only under MU with a
+            // non-empty list; the classic footer is untouched.
+            if theme.id.isMU {
+                let images = Wallpapers.images()
+                if !images.isEmpty {
+                    Button {
+                        themeStore.cycleBackground(count: images.count)
+                        DiagLog.write("theme", "mu background cycled to \(themeStore.bgIndex + 1)/\(images.count)")
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "photo")
+                            Text("Đổi hình nền · \((themeStore.bgIndex % images.count) + 1)/\(images.count)")
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .font(.system(size: 20, weight: .medium))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(TVPillFace(focused: focusedKey == "ftr:bg",
+                                               selected: false, theme: theme))
+                    }
+                    .tvCardButton()
+                    .focused($focusedKey, equals: "ftr:bg")
+                }
+            }
             // 1.4.8 (FL-331 round): version label read from the bundle, never
             // a hardcoded literal — a stale literal made screenshots
             // untraceable to a build (FL-015 lesson).
@@ -1379,7 +1570,7 @@ struct TVContentView: View {
 
     private func englishHeroModel(_ ch: Channel) -> HeroModel {
         HeroModel(badgeText: "🌍 BLV TIẾNG ANH · KÊNH 24/7",
-                  badgeColor: TVPalette.tealFill,
+                  badgeColor: theme.selectedFill,
                   headline: TVEnglish.displayName(ch),
                   art: ch.logoURL != nil ? .logo(ch) : .tvGlyph,
                   focusKey: "heroEN:" + ch.url)
@@ -1476,10 +1667,10 @@ struct TVContentView: View {
                         Image(systemName: "play.fill")
                             .font(.system(size: 19))
                     }
-                    .foregroundStyle(TVPalette.cyan)
+                    .foregroundStyle(theme.focusRing)
                     .padding(.horizontal, 26)
                     .padding(.vertical, 10)
-                    .overlay(Capsule().strokeBorder(TVPalette.cyan, lineWidth: 2.5))
+                    .overlay(Capsule().strokeBorder(theme.focusRing, lineWidth: 2.5))
                     .padding(.top, 4)
                 }
             }
@@ -1501,7 +1692,7 @@ struct TVContentView: View {
         // the art are untouched, so the panel is 350.
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
-        .background(tvHeroBackground(focused: focusedKey == model.focusKey))
+        .background(tvHeroBackground(focused: focusedKey == model.focusKey, theme: theme))
     }
 
     @ViewBuilder
@@ -1542,7 +1733,7 @@ struct TVContentView: View {
     }
 
     private func nuvioHeroBadgeColor(_ item: NuvioItem) -> Color {
-        item.kind == .liveEvent ? TVPalette.liveRed : TVPalette.tealFill
+        item.kind == .liveEvent ? theme.liveRed : theme.selectedFill
     }
 
     /// The fixture hero's badge with the matched state consulted
@@ -1561,20 +1752,20 @@ struct TVContentView: View {
             color = Color(red: 0.38, green: 0.38, blue: 0.42)
         } else if let state, state.status == .live || state.status == .ht {
             text = "🔴 ĐANG ĐÁ · " + (state.badgeText ?? "")
-            color = TVPalette.liveRed
+            color = theme.liveRed
         } else if bucket == 0 {
             text = "🔴 ĐANG ĐÁ · " + (MatchStateStore.computedBadge(kickoff: ch.kickoff ?? now, now: now)
                 ?? "\(TVKickoffFormat.liveMinute(of: ch.kickoff ?? now, now: now))'")
-            color = TVPalette.liveRed
+            color = theme.liveRed
         } else if let kickoff = ch.kickoff, kickoff > now {
             text = "⏰ " + TVKickoffFormat.timeDay.string(from: kickoff)
-            color = TVPalette.tealFill
+            color = theme.selectedFill
         } else if ch.kickoff != nil {
             text = "↺ PHÁT LẠI"
             color = Color(red: 0.38, green: 0.38, blue: 0.42)
         } else {
             text = "📺 " + ch.group
-            color = TVPalette.tealFill
+            color = theme.selectedFill
         }
         return (text, color)
     }
@@ -1628,5 +1819,37 @@ struct TVContentView: View {
         boardRequest = BoardRequest(entry: entry,
                                     vnSources: store.sources(for: entry.channel),
                                     enItems: attachedNuvioEvents(for: entry))
+    }
+}
+
+/// The MU wallpaper layer (1.7.0): ONE photo, decoded
+/// DOWNSAMPLED (some wallpapers are 8002 px wide — a full-size
+/// decode would be a memory spike for a background), stretched
+/// full-bleed, with the design's heavy dark scrim over it
+/// (black .55 top → .25 mid → .75 bottom) so every rail and
+/// pill above it stays readable. Loads in .task(id:) — no work
+/// on any focus path (FL-128).
+private struct TVWallpaperView: View {
+    let url: URL
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+            LinearGradient(
+                colors: [Color.black.opacity(0.55),
+                         Color.black.opacity(0.25),
+                         Color.black.opacity(0.75)],
+                startPoint: .top, endPoint: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+        .task(id: url) {
+            image = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+        }
     }
 }
