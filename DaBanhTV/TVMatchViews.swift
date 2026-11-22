@@ -1500,22 +1500,24 @@ extension EnvironmentValues {
     }
 }
 
-/// The MU card face (1.7.1): radius 12, the focused state is
-/// the maroon gradient (tileFocusedBG → minuteRed at 0.35)
-/// with the gold focus ring drawn INSIDE the bounds
-/// (strokeBorder 3); idle is the flat tileBG with the 1.5 pt
-/// tile border. Beside tvCardBackground, same construction —
-/// the drawn face is the only focus layer.
+/// The MU card face (1.7.1): radius 10 (1.7.2, audit H20),
+/// the focused state is the maroon gradient (tileFocusedBG →
+/// minuteRed — OPAQUE since 1.7.2, audit H23: at 0.35 alpha
+/// the second stop let a bright wallpaper glow through the
+/// focused card pink) with the gold focus ring drawn INSIDE
+/// the bounds (strokeBorder 3); idle is the flat tileBG with
+/// the 1.5 pt tile border. Beside tvCardBackground, same
+/// construction — the drawn face is the only focus layer.
 func tvMUCardBackground(focused: Bool, theme: TVThemeTokens) -> some View {
-    RoundedRectangle(cornerRadius: 12)
+    RoundedRectangle(cornerRadius: 10)
         .fill(focused
               ? AnyShapeStyle(LinearGradient(
                     colors: [theme.tileFocusedBG,
-                             theme.minuteRed.opacity(0.35)],
+                             theme.minuteRed],
                     startPoint: .topLeading, endPoint: .bottomTrailing))
               : AnyShapeStyle(theme.tileBG))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
                               lineWidth: focused ? 3 : 1.5))
 }
@@ -1615,9 +1617,11 @@ struct TVMUMatchCard: View {
         let now = Date()
         if entry.isLive {
             TVMULiveLine()
+            // 1.7.2 (audit H25): the minute number is RED
+            // in the design, not the gold accent.
             Text(entry.state?.minuteText ?? entry.badgeText ?? "")
                 .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(theme.accent)
+                .foregroundStyle(theme.minuteRed)
                 .lineLimit(1)
         } else if entry.state?.status == .ft {
             Text("FT")
@@ -1703,15 +1707,16 @@ struct TVMUMatchCard: View {
         Group {
             if let teams = entry.teams {
                 HStack(alignment: .center, spacing: 0) {
+                    // 1.7.2 (audit H29): team names 22 → 24 pt.
                     Text(teams.0)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
                     Text(teams.1)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
@@ -1755,7 +1760,9 @@ struct TVMUMatchCard: View {
 
 // MARK: MU rail header + fixture rail
 
-/// The MU rail header (1.7.1, table H4): title 34 bold, the
+/// The MU rail header (1.7.1, table H4): title 40 bold
+/// (1.7.2, audit H15 — the design's rail titles measure
+/// ≈40 pt; the fixed 50 slot still holds the line), the
 /// rail's real count as a "%02d" chip in the accent family,
 /// and an optional right-aligned note (the SẮP ĐÁ rail's
 /// device date — W-B passes it). FIXED height 50.
@@ -1768,7 +1775,7 @@ struct TVMURailHeader: View {
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Text(title)
-                .font(.system(size: 34, weight: .bold))
+                .font(.system(size: 40, weight: .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Text(String(format: "%02d", count))
@@ -1958,15 +1965,18 @@ struct TVMUNuvioEventCard: View {
         Group {
             if let teams = item.teams {
                 HStack(alignment: .center, spacing: 0) {
+                    // 1.7.2 (audit H29 twin): this card renders
+                    // the same design card as TVMUMatchCard —
+                    // its team names take the same 24 pt.
                     Text(teams.0)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
                     Text(teams.1)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)

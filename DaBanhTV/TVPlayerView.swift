@@ -1048,9 +1048,12 @@ struct TVMatchBoardView: View {
             .frame(width: 68, height: 52)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 10) {
+                    // 1.7.2 (audit M17): the design keeps the
+                    // focused row's title WHITE — the gold
+                    // lives in the border and the ▶.
                     Text(title)
                         .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(focused ? theme.accent : .white)
+                        .foregroundStyle(.white)
                         .lineLimit(1)
                     if group == .vn && isPrimary {
                         Text("KHUYÊN DÙNG")
@@ -1451,15 +1454,18 @@ struct TVMatchBoardView: View {
         if theme.id.isMU {
             // MU: charcoal fill; focused = maroon gradient +
             // gold 3 pt stroke (one owner of the silhouette —
-            // the rounded rect below — as on classic).
-            RoundedRectangle(cornerRadius: 14)
+            // the rounded rect below — as on classic). Radius
+            // 8 since 1.7.2 (audit M18) and the gradient's
+            // second stop is OPAQUE (audit H23) — the classic
+            // arm below keeps radius 14 verbatim.
+            RoundedRectangle(cornerRadius: 8)
                 .fill(focused
                     ? AnyShapeStyle(LinearGradient(
-                        colors: [theme.tileFocusedBG, theme.minuteRed.opacity(0.35)],
+                        colors: [theme.tileFocusedBG, theme.minuteRed],
                         startPoint: .leading, endPoint: .trailing))
                     : AnyShapeStyle(theme.tileBG))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
                                       lineWidth: focused ? 3 : 1.5))
         } else {

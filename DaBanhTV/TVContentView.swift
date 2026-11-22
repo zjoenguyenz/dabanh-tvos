@@ -525,7 +525,13 @@ struct TVContentView: View {
             // clipped on the real screen. The full count sheet
             // is in BUILD-151-REPORT.md.
             .padding(.horizontal, 0)
-            .padding(.top, 0)
+            // 1.7.2 (audit H9; owner ruling 2026-11-22 00:41
+            // CST — keep the header HIGH, never lower it, but
+            // not jammed against the edge): under MU the root
+            // carries a guaranteed 27 pt top inset, the
+            // design's header-band proportion (its band starts
+            // 27 pt from the edge). Classic keeps 0 exactly.
+            .padding(.top, theme.id.isMU ? 27 : 0)
             .padding(.bottom, 0)
         }
         .environment(\.tvTileWidth, tileWidth)
@@ -782,6 +788,22 @@ struct TVContentView: View {
             if let url = currentWallpaperURL {
                 TVWallpaperView(url: url)
             }
+            // 1.7.2 (audit H10): a dedicated top scrim band
+            // behind the header + tab zone. The wallpaper's
+            // own 3-stop scrim tops out at black .55 — over a
+            // bright-sky wallpaper the header and tab rows
+            // washed out (owner photo 2, 2026-11-22). This
+            // band guarantees a dark ground over the top
+            // ~380 pt (safe area + inset + header + tab bar
+            // + status slot) and fades out before the rails.
+            LinearGradient(
+                colors: [Color.black.opacity(0.85),
+                         Color.black.opacity(0.55),
+                         Color.black.opacity(0)],
+                startPoint: .top, endPoint: .bottom)
+                .frame(height: 380)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: .top)
         }
         .ignoresSafeArea()
     }
@@ -861,10 +883,21 @@ struct TVContentView: View {
                             .foregroundStyle(theme.leagueTx)
                     }
                 }
+                // 1.7.2 (audit H6): the design wraps this
+                // line in TWO lines, its block centred at
+                // ≈44% of the width (not 50%). The 230 pt
+                // frame is what makes the string wrap (and
+                // breaks it before "DREAMS", as drawn); the
+                // −115 offset moves the block's centre from
+                // 960 (50%) to 845 (44% of 1920).
                 Text("◆ THE THEATRE OF DREAMS ◆")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(theme.accent)
                     .tracking(3)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(width: 230)
+                    .offset(x: -115)
             }
             Rectangle()
                 .fill(Color.white.opacity(0.14))
@@ -873,30 +906,13 @@ struct TVContentView: View {
         }
     }
 
-    private var countText: String {
-        if isENTab {
-            return "\(nuvio.totalCount + enChannels.count) kênh tiếng Anh"
-        }
-        if store.selectedLeague == PlaylistStore.liveTabValue {
-            return "\(entries.count) trận đang đá"
-        }
-        if store.selectedLeague == PlaylistStore.hotTabValue {
-            return "\(entries.count) trận hot"
-        }
-        if isCupTab {
-            return "\(entries.count) trận cúp châu Âu"
-        }
-        if foldLeague != nil && hasLeagueAddon {
-            let matches = entries.count + leagueLiveEvents.count + leagueUpcomingEvents.count
-            return leagueAddonChannels.isEmpty
-                ? "\(matches) trận"
-                : "\(matches) trận · \(leagueAddonChannels.count) kênh"
-        }
-        return "\(entries.count) trận"
-    }
+    // 1.7.2 (audit H13): the tab row's right-side count text
+    // ("6 trận đang đá") is REMOVED — the design has nothing
+    // at the tab row's right. Its countText property went
+    // with it (the tab bar below was its only reader).
 
     private var tabBar: some View {
-        // Two rows since v1.2.7: the pills + count fill row one, and
+        // Two rows since v1.2.7: the pills alone fill row one, and
         // the action buttons get a row of their own — cramming both
         // into one HStack (~2,290pt) exceeded the 1,800pt available
         // and crushed the buttons until focus could not land on them.
@@ -921,11 +937,6 @@ struct TVContentView: View {
                     tabPill(title: league.tabTitle, value: league.rawValue)
                 }
                 Spacer()
-                Text(countText)
-                    .font(.system(size: 20))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
             }
             HStack(spacing: 12) {
                 // The action buttons stay near the pills on purpose: as
@@ -1128,6 +1139,23 @@ struct TVContentView: View {
                 let b = store.effectiveBucket(of: $0.channel, now: now)
                 return b == 1 || b == 2
             }
+            // 1.7.2 (audit H1): on the Trực tiếp tab the tab's
+            // own entries come from the store's LIVE-ONLY list
+            // (tabChannels = store.liveChannels), so `upcoming`
+            // there is empty by construction and the design's
+            // second rail could never render on Home. Under MU
+            // the home's SẮP ĐÁ rail is fed from the WHOLE
+            // pool instead (allEntries, buckets 1/2, MU pin
+            // first — the pinned fixture is exactly the
+            // content this rail exists for). Every other tab,
+            // and the classic theme everywhere, keeps the
+            // tab's own list verbatim.
+            let muUpcoming = (theme.id.isMU && onLiveTab)
+                ? TVFixtureEntry.pinnedFirst(allEntries.filter {
+                    let b = store.effectiveBucket(of: $0.channel, now: now)
+                    return b == 1 || b == 2
+                  })
+                : upcoming
             let rest = topEntries.filter { store.effectiveBucket(of: $0.channel, now: now) == 3 }
             let lowerLive = lowerEntries.filter {
                 store.effectiveBucket(of: $0.channel, now: now) == 0
@@ -1204,8 +1232,8 @@ struct TVContentView: View {
                         if !leagueLiveEvents.isEmpty {
                             nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", leagueLiveEvents)
                         }
-                        if !upcoming.isEmpty {
-                            railSection("⏰  SẮP ĐÁ", upcoming,
+                        if !muUpcoming.isEmpty {
+                            railSection("⏰  SẮP ĐÁ", muUpcoming,
                                         muNote: TVKickoffFormat.muRailDateFormatter.string(from: now))
                         }
                         if !leagueUpcomingEvents.isEmpty {
@@ -1345,14 +1373,10 @@ struct TVContentView: View {
 
     private var footerRow: some View {
         HStack {
-            // Standing credit: football-logos.cc supplies part
-            // of the shared crest set. The footer is this app's
-            // only persistent about surface — DaBanhTV has no
-            // Settings screen — so the credit lives here,
-            // beside the version label.
-            Text("Logos: football-logos.cc")
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.4))
+            // 1.7.2 (owner ruling 2026-11-22 00:40 CST —
+            // "bỏ đi luôn": he watches at home, no credit
+            // needed): the "Logos: football-logos.cc" line
+            // that stood here is removed entirely.
             Spacer()
             // 1.7.0 MU only: the Change-background control —
             // cycles the shared wallpaper list (choice persists
