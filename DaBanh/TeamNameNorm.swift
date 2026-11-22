@@ -518,6 +518,55 @@ enum TeamNameNorm {
         "ural yekaterinburg": "ural",               // FotMob "Ural"
         "twente enschede": "twente",               // FotMob "Twente"
         "fluminese": "fluminense",                  // ESPN "Fluminense" (playlist typo)
+        // Dup-scan regression 20261122T012437 (2026-11-22) —
+        // every entry measured on that run's own playlist +
+        // feed snapshot (REGRESSION-20261122-ANALYSIS.md).
+        // Two pairs also collapse a duplicate card (Harm B)
+        // outright — Liverpool/MU and Genoa/Sassuolo; the
+        // Athletico/Remo and Juventus/Venezia pairs collapse
+        // only partially (see the non-alias notes at the end
+        // of this block). Sony's BelongKey already carries
+        // four of these entries (man united, den haag,
+        // erzurum bb, ksc) — mirrored here for parity.
+        "man united": "manchester united",          // Phá Làng "Man Utd" twin card beside the bound 37-source group
+        "venezia f c": "venezia",                   // "Venezia F.C." — spaced dots strand bare f/c tokens
+        "sassuolo calcio": "sassuolo",              // "US Sassuolo Calcio" (us is filler)
+        "u sassuolo calcio": "sassuolo",            // "U.S. Sassuolo Calcio" — bare u survives
+        "atletico paranaense": "athletico paranaense", // misspelt stem — converges on the club's OWN full name, never on bare "athletico" (that stem is Athletico SC, Lebanon — see the non-alias notes)
+        "remo belem": "remo",                       // feeds write bare "Remo"
+        "den haag": "ado den haag",                 // FotMob "ADO Den Haag" (Sony parity)
+        "erzurum bb": "erzurumspor",                // FotMob "Erzurumspor" (Sony parity)
+        "ksc": "karlsruher",                        // ESPN "Karlsruher SC" (sc is filler; Sony parity)
+        "ai cap": "egypt",                          // VN national-team block; FotMob "Egypt" (age tag re-attaches)
+        "celta vigo b": "celta fortuna",            // club renamed: Celta's reserve side is now Celta Fortuna
+        "rc celta fortuna": "celta fortuna",        // ESPN's prefixed form of the same club
+        "hamburger sv": "hamburger",                // FotMob form; playlist writes bare "Hamburger"
+        "hamburg sv": "hamburger",                  // ESPN's anglicised form of the same club
+        "sg dynamo dresden": "dynamo dresden",      // ESPN writes "Dynamo Dresden"
+        "kamatamare": "kamatamare sanuki",          // playlist's truncated "Kamatamare Sk" (sk is filler); FotMob full name
+        "union saint gilloise": "union st gilloise", // FotMob "Union St. Gilloise" — whole-name, NOT a saint→st token alias: the token form would merge Saint George SC (Ethiopia) into St George FC (Australia)
+        // - "sarpsborg ff" deliberately NOT aliased
+        //   (gate round 3, 2026-11-22): its only binding
+        //   target "sarpsborg" is Sarpsborg FK's stem (fk
+        //   is filler) — a distinct club from Sarpsborg
+        //   08 FF (they met in the Norwegian Cup, 2024).
+        //   The aarhus discipline: the playlist's FF
+        //   listing stays unbound rather than merge two
+        //   clubs into one key.
+        // - "juventus f c" deliberately NOT aliased
+        //   (gate R3 round 1, 2026-11-22): its only
+        //   binding target "juventus" is the natural stem
+        //   of other extant clubs (CA Juventus of São
+        //   Paulo, GE Juventus, Juventus F.C. of Belize —
+        //   whose dotted name is this very key). The
+        //   playlist's dotted Turin spelling stays a
+        //   separate group; the Venezia side still merges.
+        // - Bare "athletico" deliberately NOT converged
+        //   with the Paranaense long forms (gate R3
+        //   round 1, 2026-11-22): "athletico" is Athletico
+        //   SC of Lebanon's stem. The long forms converge
+        //   on the club's own full name instead; ESPN's
+        //   bare form keeps its shipped behaviour.
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,
