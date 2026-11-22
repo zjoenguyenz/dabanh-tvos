@@ -401,15 +401,6 @@ struct TVThemePickerView: View {
 
     var body: some View {
         ZStack {
-            theme.boardBG.ignoresSafeArea()
-            // The design's artwork-backed settings: under MU
-            // with a wallpaper, the photo sits under a heavy
-            // boardBG wash.
-            if theme.id.isMU, let url = currentWallpaperURL {
-                TVMUWallpaperLayer(url: url, dim: 0.7)
-                    .ignoresSafeArea()
-                theme.boardBG.opacity(0.4).ignoresSafeArea()
-            }
             VStack(alignment: .leading, spacing: 30) {
                 headerRow
                 Text("Giao diện")
@@ -440,6 +431,32 @@ struct TVThemePickerView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity,
                    alignment: .topLeading)
         }
+        // 1.7.6 (FL-439): the artwork layer is the picker's
+        // BACKGROUND, not a ZStack sibling — the same
+        // binding the board root took this round. The S4
+        // anchor above fixed the foreground's side of the
+        // negotiation; the layer's own side is closed here:
+        // background content is sized BY the surface, so a
+        // taller-than-stage photo fills the frame and can
+        // no longer push the "Giao diện" title off the top
+        // edge. The design's artwork-backed settings stand:
+        // under MU with a wallpaper, the photo sits under
+        // the same heavy boardBG wash, at the same dim.
+        .background {
+            // The full backdrop stack lives here, in the
+            // ORIGINAL order — boardBG under the photo under
+            // its wash. (boardBG may not stay a ZStack child
+            // above this background: it is opaque and would
+            // hide the photo entirely.)
+            ZStack {
+                theme.boardBG
+                if theme.id.isMU, let url = currentWallpaperURL {
+                    TVMUWallpaperLayer(url: url, dim: 0.7)
+                    theme.boardBG.opacity(0.4)
+                }
+            }
+            .ignoresSafeArea()
+        }
         .defaultFocus($focusedID, Self.cardID(themeStore.themeID))
         .onExitCommand { dismiss() }
     }
@@ -454,6 +471,19 @@ struct TVThemePickerView: View {
             Text("← Quay lại")
                 .font(pfont(21, .semibold))
                 .foregroundStyle(theme.leagueTx)
+            // 1.7.6 (FL-441, RECALC-DABANH RULING 1): the
+            // brand wordmark in this band's free RIGHT slot —
+            // the only slot that adds no row and shifts
+            // nothing (left is the exit line, centre is the
+            // section caps). 24 bold in the CURRENT theme's
+            // dress via pfont (Manrope under design MU,
+            // system otherwise); "Joe" white, " Soccer" in
+            // the current theme's accent.
+            (Text("Joe").foregroundStyle(.white)
+                + Text(" Soccer").foregroundStyle(theme.accent))
+                .font(pfont(24, .bold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 

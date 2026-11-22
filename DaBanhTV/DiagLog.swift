@@ -457,6 +457,19 @@ struct TVLogView: View {
                         .font(.system(size: 40, weight: .bold))
                         .foregroundStyle(.white)
                     Spacer()
+                    // 1.7.6 (FL-441, RECALC-DABANH RULING 1):
+                    // the brand wordmark in the title row,
+                    // right of the Spacer, before the Đóng
+                    // pill — 24 bold in the CURRENT theme's
+                    // dress (Manrope under design MU, system
+                    // otherwise), "Joe" white, " Soccer" in
+                    // the theme accent. No geometry changes.
+                    (Text("Joe").foregroundStyle(.white)
+                        + Text(" Soccer").foregroundStyle(theme.accent))
+                        .font(theme.id.isDesign
+                            ? TVDesignFont.ui(24, .bold)
+                            : .system(size: 24, weight: .bold))
+                        .lineLimit(1)
                     Button {
                         dismiss()
                     } label: {

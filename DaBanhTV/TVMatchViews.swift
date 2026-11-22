@@ -2299,15 +2299,15 @@ struct TVMUENChannelRail: View {
 struct TVMUWallpaperLayer: View {
     let url: URL
     let dim: Double
+    /// 1.7.6 (FL-438): settled + fading-in photos — a swap
+    /// crossfades, exactly as TVWallpaperView's pair (the
+    /// two views are the app's only wallpaper swap paths).
     @State private var image: UIImage?
+    @State private var fadingImage: UIImage?
+    @State private var fadeIn = false
 
     var body: some View {
         ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            }
             Color.black.opacity(dim)
         }
         // 1.7.4 (S4): the layer is BOUNDED — the same frame
@@ -2320,10 +2320,58 @@ struct TVMUWallpaperLayer: View {
         // audit). Callers that ignore the safe area still
         // get the full bleed; the layer itself now always
         // reports the same, parent-given size.
+        // 1.7.6 (FL-439): the S4 frame alone did NOT close
+        // the fault on the board — a max-frame yields to the
+        // parent proposal, and inside a negotiating ZStack
+        // the photo's ideal size still inflated the stack
+        // (WALLPAPER-AUDIT-20261122 §4: steady per image,
+        // severity ordered by aspect). The photo therefore
+        // also moves OUT of this view's own stack: it is the
+        // dim stack's BACKGROUND, sized BY this layer's
+        // frame — a bitmap of any aspect fills the frame
+        // and negotiates nothing, here or at any call site.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
+                if let fadingImage {
+                    Image(uiImage: fadingImage)
+                        .resizable()
+                        .scaledToFill()
+                        .opacity(fadeIn ? 1 : 0)
+                }
+            }
+        }
         .clipped()
         .task(id: url) {
-            image = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+            // Gate Round 1 (Lens A): this task owns the
+            // fade state from its first line — a superseded
+            // task's in-flight fade is cleared HERE, so no
+            // early exit (failed load, same-instance cache
+            // hit, cancellation) can strand a stale photo
+            // over the settled one. Same fix as
+            // TVWallpaperView's task.
+            fadingImage = nil
+            fadeIn = false
+            let loaded = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+            guard !Task.isCancelled, let loaded else { return }
+            guard let settled = image else {
+                image = loaded
+                return
+            }
+            if loaded === settled { return }
+            fadingImage = loaded
+            fadeIn = false
+            withAnimation(.easeInOut(duration: 0.5)) { fadeIn = true }
+            try? await Task.sleep(for: .milliseconds(550))
+            guard !Task.isCancelled, fadingImage === loaded else { return }
+            image = loaded
+            fadingImage = nil
+            fadeIn = false
         }
     }
 }
@@ -2334,9 +2382,12 @@ struct TVMUWallpaperLayer: View {
 // design theme (theme.id == .unitedDesign). The MU Wally family
 // above is untouched. The design's rules that differ from the
 // shipped MU look, per the designer's drawings + answers:
-// - the app header is crest + "ĐÁ BANH TV" + the letterspaced
-//   MANCHESTER UNITED tagline (the mock's centre sample-data
-//   line and its "Cài đặt" link are mock furniture, not app UI);
+// - the app header is crest + the brand wordmark + the
+//   letterspaced MANCHESTER UNITED tagline (the mock's centre
+//   sample-data line and its "Cài đặt" link are mock furniture,
+//   not app UI); the wordmark TEXT is the owner's brand
+//   "Joe Soccer" since 1.7.6 (FL-441) — the drawing's lockup
+//   geometry and dress stand, only its text was superseded;
 // - tabs are plain text: selected = gold outline + red
 //   underline, NO red dot;
 // - rail counts are plain numbers in an outlined chip;
@@ -2358,8 +2409,16 @@ struct TVDesignHeader: View {
             HStack(alignment: .center, spacing: 14) {
                 TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 64)
                 VStack(alignment: .leading, spacing: 3) {
-                    (Text("ĐÁ BANH").foregroundStyle(.white)
-                        + Text("TV").foregroundStyle(theme.accent))
+                    // 1.7.6 (FL-441, RECALC-DABANH RULING 1 —
+                    // Form A): the wordmark text is the
+                    // owner's brand "Joe Soccer"; the face is
+                    // the theme's UI face at Bold 34 (Manrope
+                    // — the recorded Outfit→Manrope
+                    // substitution), "Joe" in the theme Text,
+                    // " Soccer" in the design gold. Geometry
+                    // and tagline are the drawing's, unchanged.
+                    (Text("Joe").foregroundStyle(.white)
+                        + Text(" Soccer").foregroundStyle(theme.accent))
                         .font(TVDesignFont.ui(34, .bold))
                     Text("MANCHESTER UNITED")
                         .font(TVDesignFont.ui(12, .semibold))

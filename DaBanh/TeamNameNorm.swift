@@ -545,6 +545,51 @@ enum TeamNameNorm {
         "sg dynamo dresden": "dynamo dresden",      // ESPN writes "Dynamo Dresden"
         "kamatamare": "kamatamare sanuki",          // playlist's truncated "Kamatamare Sk" (sk is filler); FotMob full name
         "union saint gilloise": "union st gilloise", // FotMob "Union St. Gilloise" — whole-name, NOT a saint→st token alias: the token form would merge Saint George SC (Ethiopia) into St George FC (Australia)
+        // Dup-scan regression 20261122T072438 (2026-11-22) —
+        // the run's 17 NEW unbound pairs, each measured on
+        // that run's own playlist + feed snapshot (same
+        // fixture, same kickoff instant, other side
+        // anchored; REGRESSION-20261122-ANALYSIS.md for the
+        // earlier run of the same family). Each target stem
+        // has exactly one producer club in the snapshot
+        // (the aarhus test):
+        "al shamal sports": "al shamal",            // "Al-Shamal Sports Club" (sc/club filler) vs FotMob "Al Shamal"
+        "esteghlal tehran": "esteghlal",            // playlist city suffix vs FotMob "Esteghlal"
+        "tractor c": "tractor",                     // "Tractor S.C." — bare c survives step 1 (the juventus shape)
+        "atalanta b c": "atalanta",                 // "Atalanta B.C." vs ESPN "Atalanta"
+        "atl madrid": "atletico madrid",            // playlist abbreviation vs ESPN "Atletico Madrid"
+        "atletico lanus": "lanus",                  // "Club Atlético Lanús" (club/ca filler) vs FotMob "Lanus"
+        "scu torreense": "torreense",               // "SCU Torreense" vs FotMob "Torreense"
+        "vasco gama saf": "vasco gama",             // "Vasco da Gama Saf _ RJ" (da filler, RJ state suffix) vs ESPN "Vasco Gama"
+        "chivas guadalajara": "chivas",             // three playlist spellings of Club Deportivo Guadalajara,
+        "deportivo guadalajara": "chivas",          // all on the Cruz Azul fixture (2026-11-23) that
+        "guadalajara chivas": "chivas",             // FotMob carries as "Chivas"
+        "instituto cordoba": "instituto",           // "Instituto de Córdoba" (de filler) vs FotMob "Instituto" — the belgrano cordoba shape
+        "olympique marseille": "marseille",         // playlist full name vs ESPN "Marseille" — the olympique lyonnais shape
+        "birmingham": "birmingham city",            // women's fixture: the playlist's bare "Nữ Birmingham" vs FotMob "Birmingham City" — the bare form maps UP to the binding key (the elversberg precedent); one club, marker discipline unchanged
+        "tottenham": "tottenham hotspur",           // women's fixture: the playlist's "Nữ Tottenham" vs FotMob "Tottenham Hotspur"; the men's listings already write the full name, and no second Tottenham club exists
+        // Two REVERSALS of the 1.7.3 gate notes below,
+        // reversed on the regression runs' own feed
+        // evidence (2026-11-22) — the earlier verdicts and
+        // their reasoning stay recorded at the end of this
+        // block; what changed is the evidence:
+        // - "juventus f c": the stranded spelling is the
+        //   playlist's dotted name for THIS club in THIS
+        //   fixture (vs Venezia; ESPN "Juventus"), the
+        //   "hellas verona f c" precedent is this table's
+        //   own, and the distinct-club stems the old note
+        //   named (CA Juventus &c.) reduce to "juventus"
+        //   with or without this entry — the alias adds
+        //   only the dotted-Turin spelling to that stem.
+        // - "sarpsborg ff": in the measured fixture the
+        //   feed's own "Sarpsborg 08" reduces to
+        //   "sarpsborg" (the numeric drops) — the feed
+        //   stem IS Sarpsborg 08 in this fixture (vs
+        //   Lillestrøm, Eliteserien). The Sarpsborg FK
+        //   caution stands as a warning, but pair keys
+        //   still separate fixtures by opponent + kickoff.
+        "juventus f c": "juventus",
+        "sarpsborg ff": "sarpsborg",
         // - "sarpsborg ff" deliberately NOT aliased
         //   (gate round 3, 2026-11-22): its only binding
         //   target "sarpsborg" is Sarpsborg FK's stem (fk
@@ -553,11 +598,20 @@ enum TeamNameNorm {
         //   The aarhus discipline: the playlist's FF
         //   listing stays unbound rather than merge two
         //   clubs into one key.
+        //   ⚠ REVERSED later the same day (1.7.6, dup-scan
+        //   run 20261122T072438 #17): the feed's own
+        //   "Sarpsborg 08" reduces to this very stem — see
+        //   the "sarpsborg ff" entry above. This note is
+        //   kept as the record of the earlier verdict and
+        //   its caution.
         // - "juventus f c" deliberately NOT aliased
         //   (gate R3 round 1, 2026-11-22): its only
         //   binding target "juventus" is the natural stem
         //   of other extant clubs (CA Juventus of São
         //   Paulo, GE Juventus, Juventus F.C. of Belize —
+        //   ⚠ REVERSED later the same day (1.7.6, dup-scan
+        //   run 20261122T072438 #11/#12): see the
+        //   "juventus f c" entry above. Kept as history.
         //   whose dotted name is this very key). The
         //   playlist's dotted Turin spelling stays a
         //   separate group; the Venezia side still merges.

@@ -62,6 +62,13 @@ struct TVContentView: View {
     /// state moved down into its rail view (TVMatchViews), so a
     /// focus step inside a rail no longer re-runs this body.
     @FocusState private var focusedKey: String?
+    /// 1.7.6 (FL-438): the last moment the owner actually
+    /// browsed the board — a rail focus report (heroFocus)
+    /// or a chrome focus change. The wallpaper auto-rotate
+    /// reads it: while the owner is browsing, the rotation
+    /// PAUSES (no swap under his eyes); it resumes once the
+    /// board has been idle a full cycle and no cover is up.
+    @State private var lastBoardActivity = Date()
     /// The diagnostic log screen (KH-1).
     @State private var logOpen = false
     /// All derived fixture data, computed ONCE per data revision
@@ -308,6 +315,9 @@ struct TVContentView: View {
     /// .onChange(of: focusedKey) did — but the lookup reads the
     /// snapshot, and this body does no derived work for it.
     private func heroFocus(_ key: String) {
+        // 1.7.6 (FL-438): a rail focus step IS board
+        // browsing — stamp it for the auto-rotate pause.
+        lastBoardActivity = Date()
         if let item = snap.heroLookup[key] { heroItem = item }
     }
 
@@ -485,7 +495,17 @@ struct TVContentView: View {
 
     var body: some View {
         ZStack {
-            background
+            // 1.7.6 (FL-439): the background is NO LONGER a
+            // ZStack child. As a sibling it negotiated the
+            // stack's size, and a wallpaper bitmap taller
+            // than the stage (the set's 4:3 block, the square
+            // crest, the one portrait) inflated the stack and
+            // pushed the fixed chrome off the top edge —
+            // steady per image, exactly as the owner reported
+            // ("nền nào bị nuốt thì nó nuốt luôn"). As a
+            // .background the layer is sized BY this stack and
+            // can never inflate it; its own ignoresSafeArea
+            // still gives the full bleed.
             // KH-6: measure the REAL content width (the padded
             // region the rails live in) — the tile width derives
             // from this, never from an assumed screen size.
@@ -542,9 +562,19 @@ struct TVContentView: View {
             // carries a guaranteed 27 pt top inset, the
             // design's header-band proportion (its band starts
             // 27 pt from the edge). Classic keeps 0 exactly.
-            .padding(.top, theme.id.isMU ? 27 : 0)
+            // 1.7.6 (owner ruling 2026-11-22 13:10 CST,
+            // RECALC-DABANH RULING 2): the tab row still sits
+            // too close to the top edge — nudge it down "một
+            // chút xíu thôi": +16 pt for EVERY theme (MU
+            // 27 → 43, Classic 0 → 16), taken from the scroll
+            // viewport's flexible height only; the full-bleed
+            // background layers and the 380 pt scrim band do
+            // not move, and chrome position never differs by
+            // theme.
+            .padding(.top, theme.id.isMU ? 43 : 16)
             .padding(.bottom, 0)
         }
+        .background { background }
         .environment(\.tvTileWidth, tileWidth)
         .environment(\.tvMUCardWidth, muCardWidth)
         .environment(\.tvTheme, themeStore.tokens)
@@ -562,13 +592,29 @@ struct TVContentView: View {
             // cycles every 25 s ONLY while the MU theme is
             // active and the toggle is on; the task's id re-keys
             // (cancelling the loop) the moment either flips.
+            // 1.7.6 (FL-438): the cycle is now IDLE-GATED. The
+            // 1.7.5 loop swapped on the timer no matter what
+            // the owner was doing, and the swap was a hard cut
+            // (the crossfade half lives in the wallpaper
+            // views) — the board "jumped" under his remote.
+            // Now a swap lands only when the board has been
+            // idle for a full 25 s cycle AND no cover (player,
+            // board, log, picker) is up; while he browses, the
+            // rotation is paused, not queued.
             guard theme.id.isMU && themeStore.bgAutoRotate else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(25))
+                try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { break }
+                guard Date().timeIntervalSince(lastBoardActivity) >= 25,
+                      playRequest == nil, boardRequest == nil,
+                      !logOpen, !themeOpen else { continue }
                 let count = Wallpapers.images().count
                 if count > 1 {
                     themeStore.cycleBackground(count: count)
+                    // The swap itself starts a fresh idle
+                    // window, so the next one is a full cycle
+                    // later — never a catch-up burst.
+                    lastBoardActivity = Date()
                 }
             }
         }
@@ -638,6 +684,8 @@ struct TVContentView: View {
         // re-validates the hero); focus changes never reach
         // this body as work — the rails own their focus state
         // and report hero keys through heroFocus(_:).
+        // 1.7.6 (FL-438): chrome focus steps are browsing too.
+        .onChange(of: focusedKey) { _, _ in lastBoardActivity = Date() }
         .onChange(of: store.selectedLeague) { _, _ in dataChanged() }
         .onChange(of: store.channels) { _, _ in dataChanged() }
         .onChange(of: store.hotChannels) { _, _ in dataChanged() }
@@ -829,7 +877,9 @@ struct TVContentView: View {
     private var header: some View {
         if theme.id.isDesign {
             // 1.7.4: the design theme's own header (crest +
-            // ĐÁ BANH TV wordmark + MANCHESTER UNITED tagline).
+            // brand wordmark + MANCHESTER UNITED tagline;
+            // the wordmark text is "Joe Soccer" since
+            // 1.7.6, FL-441).
             TVDesignHeader()
         } else if theme.id.isMU {
             muHeader
@@ -837,14 +887,16 @@ struct TVContentView: View {
             HStack(alignment: .center, spacing: 18) {
                 Text("⚽")
                     .font(.system(size: 30))
-                HStack(spacing: 8) {
-                    Text("ĐÁ BANH")
-                        .font(.system(size: 30, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text("TV")
-                        .font(.system(size: 30, weight: .bold))
-                        .foregroundStyle(TVPalette.boardSky)
-                }
+                // 1.7.6 (FL-441, RECALC-DABANH RULING 1 —
+                // Form C): the wordmark is the owner's brand
+                // "Joe Soccer" in the Classic dress — the
+                // theme's own system Bold 30, "Joe" white,
+                // " Soccer" in boardSky. (Was "ĐÁ BANH TV":
+                // the brand name is the owner's ruling, the
+                // face and colours are the header's own.)
+                (Text("Joe").foregroundStyle(.white)
+                    + Text(" Soccer").foregroundStyle(TVPalette.boardSky))
+                    .font(.system(size: 30, weight: .bold))
                 Spacer()
                 Text(TVKickoffFormat.time.string(from: Date()))
                     .font(.system(size: 20))
@@ -877,8 +929,19 @@ struct TVContentView: View {
                     HStack(alignment: .center, spacing: 14) {
                         TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 84)
                         VStack(alignment: .leading, spacing: 2) {
-                            (Text("UNITED").foregroundStyle(.white)
-                                + Text("TV").foregroundStyle(theme.accent))
+                            // 1.7.6 (FL-441, RECALC-DABANH
+                            // RULING 1 — Form B): the wordmark
+                            // TEXT is the owner's brand "Joe
+                            // Soccer" — a text swap only. The
+                            // face (system Bold 40), the crest
+                            // 84 and the theme's slogan tagline
+                            // below are MU Wally's preserved
+                            // look and do not move; " Soccer"
+                            // takes the Wally gold
+                            // (theme.accent), the slot the old
+                            // "TV" wore.
+                            (Text("Joe").foregroundStyle(.white)
+                                + Text(" Soccer").foregroundStyle(theme.accent))
                                 .font(.system(size: 40, weight: .bold))
                             Text("THE MATCH. THE MOMENT. UNITED.")
                                 .font(.system(size: 13))
@@ -2205,15 +2268,18 @@ private struct TVMUTabFace: View {
 /// on any focus path (FL-128).
 private struct TVWallpaperView: View {
     let url: URL
+    /// 1.7.6 (FL-438): the settled image and the one fading
+    /// in over it. Until now the decoded image was assigned
+    /// the moment its fetch landed — a HARD CUT every swap,
+    /// the board's visible "jump" in the owner's session
+    /// log. A swap now crossfades: the new photo fades in
+    /// over the settled one, then takes its place.
     @State private var image: UIImage?
+    @State private var fadingImage: UIImage?
+    @State private var fadeIn = false
 
     var body: some View {
         ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            }
             LinearGradient(
                 colors: [Color.black.opacity(0.55),
                          Color.black.opacity(0.25),
@@ -2221,9 +2287,59 @@ private struct TVWallpaperView: View {
                 startPoint: .top, endPoint: .bottom)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 1.7.6 (FL-439): the photo is the scrim stack's
+        // BACKGROUND — sized BY this view's frame, so its
+        // bitmap (whatever its aspect) can never negotiate
+        // this view's size. The crossfade pair lives here
+        // too: settled photo under, incoming photo fading
+        // over it, both filling the same fixed frame.
+        .background {
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
+                if let fadingImage {
+                    Image(uiImage: fadingImage)
+                        .resizable()
+                        .scaledToFill()
+                        .opacity(fadeIn ? 1 : 0)
+                }
+            }
+        }
         .clipped()
         .task(id: url) {
-            image = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+            // Gate Round 1 (Lens A): this task owns the
+            // fade state from its first line. A superseded
+            // task's in-flight fade is cleared HERE, so no
+            // exit below (failed load, a same-instance
+            // cache hit on a reverted URL, cancellation)
+            // can leave a stale photo hanging over the
+            // settled one — the early returns used to
+            // strand it at full opacity indefinitely.
+            fadingImage = nil
+            fadeIn = false
+            let loaded = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+            guard !Task.isCancelled, let loaded else { return }
+            guard let settled = image else {
+                // First photo on this surface: nothing
+                // under it to fade from — it just lands.
+                image = loaded
+                return
+            }
+            if loaded === settled { return }
+            fadingImage = loaded
+            fadeIn = false
+            withAnimation(.easeInOut(duration: 0.5)) { fadeIn = true }
+            try? await Task.sleep(for: .milliseconds(550))
+            // A newer swap may have superseded this one
+            // while the fade ran; only settle when this
+            // run's photo is still the incoming one.
+            guard !Task.isCancelled, fadingImage === loaded else { return }
+            image = loaded
+            fadingImage = nil
+            fadeIn = false
         }
     }
 }

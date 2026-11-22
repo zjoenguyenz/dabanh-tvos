@@ -50,6 +50,11 @@ struct TVPlayerView: View {
     /// tap's order, so the pick is steered at the surface).
     @State private var startURL: String?
     @State private var switchOpen = false
+    /// 1.7.6 (flow audit F-DT-1): the switch-hint capsule's
+    /// visibility — raised at each session start (and after
+    /// every pick / retry, which all bump `session`), lowered
+    /// by the shell's timer task after ~5 s.
+    @State private var switchHintVisible = false
     /// 1.6.0 (web standard, point 4): the session has already
     /// crossed VN↔EN once on ladder exhaustion — the slate is
     /// allowed only after that, never a ping-pong.
@@ -90,6 +95,31 @@ struct TVPlayerView: View {
                     switchOverlay(switchContext)
                 }
             }
+            // 1.7.6 (flow audit F-DT-1): the switch hint —
+            // the in-player source switch otherwise lives
+            // ONLY inside the native transport bar's custom
+            // menu, which nothing on screen names. This
+            // capsule (the surface's own status-capsule
+            // idiom, bottom-leading) names the path for ~5 s
+            // at each session start and after every pick;
+            // it is non-interactive and never shows while
+            // the switch panel itself is up.
+            if switchContext != nil, !switchOpen, switchHintVisible {
+                switchHintCapsule
+                    .frame(maxWidth: .infinity, maxHeight: .infinity,
+                           alignment: .bottomLeading)
+                    .padding(.leading, 48)
+                    .padding(.bottom, 36)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .task(id: session) {
+            guard switchContext != nil else { return }
+            withAnimation(.easeIn(duration: 0.3)) { switchHintVisible = true }
+            try? await Task.sleep(for: .seconds(5))
+            if Task.isCancelled { return }
+            withAnimation(.easeOut(duration: 0.4)) { switchHintVisible = false }
         }
         .onExitCommand {
             if switchOpen {
@@ -133,6 +163,47 @@ struct TVPlayerView: View {
 
     // MARK: Switch overlay (the board's arrangement, spec §2)
 
+    /// The switch hint capsule (1.7.6, flow audit F-DT-1):
+    /// PlayerSurface's statusCapsule recipe carried to the
+    /// shell — Capsule shape, h18/v8 padding, the fill rule
+    /// verbatim (theme.tileBG at 0.9 under MU themes, black
+    /// 0.55 otherwise), NO stroke — and it lands in the same
+    /// bottom-leading corner as that capsule (the shell
+    /// places it at leading 48 / bottom 36, the idiom's own
+    /// offsets). (Gate Round 1, Lens B: the first pass
+    /// invented h16/v10 + a hairline and called them the
+    /// idiom's; the recipe above is the idiom's, read from
+    /// statusCapsule itself.) Its eyebrow is the caps brand
+    /// form (FL-441: 15 bold tracked 2, theme accent; the
+    /// design face under design MU) — this capsule is the
+    /// app-owned info surface over the player, so it carries
+    /// the brand the drawn info slate would have; the line
+    /// names the switch path through the native transport
+    /// bar.
+    private var switchHintCapsule: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("JOE SOCCER")
+                .font(theme.id.isDesign
+                    ? TVDesignFont.ui(15, .bold)
+                    : .system(size: 15, weight: .bold))
+                .tracking(2)
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Text("Đổi nguồn trong lúc xem: thanh điều khiển ▸ Đổi nguồn")
+                .font(theme.id.isDesign
+                    ? TVDesignFont.ui(19)
+                    : .system(size: 19))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .background(
+            Capsule().fill(theme.id.isMU
+                ? theme.tileBG.opacity(0.9)
+                : Color.black.opacity(0.55)))
+    }
+
     private func openSwitch() {
         guard switchContext != nil else { return }
         DiagLog.write("player", "switch overlay opened")
@@ -163,6 +234,17 @@ struct TVPlayerView: View {
             Color.black.opacity(0.55).ignoresSafeArea()
             VStack(alignment: .leading, spacing: 26) {
                 VStack(alignment: .leading, spacing: 8) {
+                    // 1.7.6 (FL-441, RECALC-DABANH RULING 1):
+                    // the caps brand eyebrow above the panel
+                    // title — 15 bold tracked 2 in the theme
+                    // accent. The panel is an outer surface;
+                    // the live video itself never carries a
+                    // persistent brand.
+                    Text("JOE SOCCER")
+                        .font(.system(size: 15, weight: .bold))
+                        .tracking(2)
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(1)
                     Text(ctx.title)
                         .font(.system(size: 34, weight: .bold))
                         .foregroundStyle(.white)
@@ -259,6 +341,17 @@ struct TVPlayerView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 6) {
+                            // 1.7.6 (FL-441, RECALC-DABANH
+                            // RULING 1): the caps brand eyebrow
+                            // above the panel title — 15 bold
+                            // tracked 2 in the design gold, the
+                            // design face. Same ruling as the
+                            // centred overlay's eyebrow.
+                            Text("JOE SOCCER")
+                                .font(TVDesignFont.ui(15, .bold))
+                                .tracking(2)
+                                .foregroundStyle(theme.accent)
+                                .lineLimit(1)
                             Text("Chọn nguồn phát")
                                 .font(TVDesignFont.ui(34, .bold))
                                 .foregroundStyle(.white)
@@ -482,11 +575,13 @@ private struct PlayerSurface: View {
     /// (1.6.0): the shell decides whether the match's pool is
     /// really spent (cross VN↔EN) or the slate stands.
     var onExhausted: (() -> Void)? = nil
-    /// The design theme's no-signal slate buttons (1.7.4, Q7):
-    /// retry rebuilds the surface on the same resolution (a
-    /// fresh ladder walk), close dismisses the player. Only
-    /// the design slate reads them; the classic / MU Wally
-    /// slate is text-only exactly as before.
+    /// The no-signal slate buttons (1.7.4, Q7): retry
+    /// rebuilds the surface on the same resolution (a fresh
+    /// ladder walk), close dismisses the player. The design
+    /// slate read them first; since 1.7.6 (flow audit
+    /// F-DT-3) the classic / MU Wally slate carries the same
+    /// three actions in its own dress — no slate is
+    /// text-only any more.
     var onRetry: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     /// A VN pick from the switch overlay (v1.4.1): the rung
@@ -695,15 +790,46 @@ private struct PlayerSurface: View {
             if theme.id.isDesign {
                 designNoSignal
             } else {
+                // 1.7.6 (flow audit F-DT-3 + FL-441): this
+                // slate was TEXT-ONLY — when every source
+                // died, the owner's only move was Menu out,
+                // with no retry and no source switch, while
+                // the design slate carried all three actions.
+                // It now carries the same three actions in the
+                // Classic/Wally dress (classicSlateButton:
+                // system face, the slate family's tokens),
+                // focus asserted to Thử lại, and the brand
+                // wordmark above the title (22 bold, centred,
+                // " Soccer" in the theme accent). The copy
+                // drops the Menu instruction — the actions are
+                // the way out now (Menu still exits, as it
+                // does everywhere).
                 VStack(spacing: 18) {
+                    (Text("Joe").foregroundStyle(.white)
+                        + Text(" Soccer").foregroundStyle(theme.accent))
+                        .font(.system(size: 22, weight: .bold))
+                        .lineLimit(1)
                     Text("MẤT TÍN HIỆU")
                         .font(.system(size: 54, weight: .bold))
                         .tracking(4)
                         .foregroundStyle(.white)
-                    Text("Tất cả các nguồn của trận này đều không phát được. Bấm Menu để quay lại.")
+                    Text("Tất cả các nguồn của trận này đều không phát được.")
                         .font(.title3)
                         .foregroundStyle(.white.opacity(0.65))
+                    HStack(spacing: 18) {
+                        classicSlateButton(title: "Thử lại", id: "slate:retry",
+                                           primary: true) { onRetry?() }
+                        if showsSwitchButton, let onSwitchButton {
+                            classicSlateButton(title: "Đổi nguồn", id: "slate:switch",
+                                               primary: false) { onSwitchButton() }
+                        }
+                        classicSlateButton(title: "Đóng", id: "slate:close",
+                                           primary: false) { onClose?() }
+                    }
+                    .padding(.top, 8)
                 }
+                .defaultFocus($slateFocus, "slate:retry")
+                .onAppear { slateFocus = "slate:retry" }
             }
         }
     }
@@ -728,6 +854,15 @@ private struct PlayerSurface: View {
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // 1.7.6 (FL-441, RECALC-DABANH RULING 1): the
+            // brand wordmark centred above the slate title —
+            // title-case, 22 bold in the design face, "Joe"
+            // white, " Soccer" in the design gold. The glyph
+            // row and the panel geometry are untouched.
+            (Text("Joe").foregroundStyle(.white)
+                + Text(" Soccer").foregroundStyle(theme.accent))
+                .font(TVDesignFont.ui(22, .bold))
+                .lineLimit(1)
             Text("Không có tín hiệu")
                 .font(TVDesignFont.ui(48, .bold))
                 .foregroundStyle(.white)
@@ -771,6 +906,35 @@ private struct PlayerSurface: View {
         return Button(action: action) {
             Text(title)
                 .font(TVDesignFont.ui(24, .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 34)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(primary ? theme.unitedRed : theme.tileBG)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(focused ? theme.focusRing
+                                                      : theme.tileBorder,
+                                              lineWidth: focused ? 3 : 1.5)))
+        }
+        .tvCardButton()
+        .focused($slateFocus, equals: id)
+    }
+
+    /// The Classic / MU Wally slate button (1.7.6, flow
+    /// audit F-DT-3): slateButton's exact face — same
+    /// tokens, same focus ring, same primary fill — in the
+    /// system face these themes speak. It exists so the
+    /// Classic/Wally no-signal slate carries the same three
+    /// actions as the design slate instead of text alone.
+    private func classicSlateButton(title: String, id: String, primary: Bool,
+                                    action: @escaping () -> Void) -> some View {
+        let focused = slateFocus == id
+        return Button(action: action) {
+            Text(title)
+                .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .padding(.horizontal, 34)
@@ -1068,6 +1232,28 @@ struct TVMatchBoardView: View {
                 classicBoard
             }
         }
+        // 1.7.6 (flow audit F-DT-2): the staged Menu exit
+        // (list first, then the board) is a house rule the
+        // owner relies on, but NOTHING on screen said the
+        // first Menu press only closes the list — the board
+        // read as ignoring his exit. While the source list
+        // is open, a small cue at the bottom-trailing corner
+        // names the stage. One overlay for all three themes,
+        // in each theme's own face at the muted tier;
+        // non-interactive.
+        .overlay(alignment: .bottomTrailing) {
+            if showSources {
+                Text("Menu — đóng danh sách nguồn")
+                    .font(theme.id.isDesign
+                        ? TVDesignFont.ui(17)
+                        : .system(size: 17))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+                    .padding(.trailing, 60)
+                    .padding(.bottom, 30)
+                    .allowsHitTesting(false)
+            }
+        }
         .onExitCommand { handleBoardExit() }
         .onAppear {
             focusedRow = showSources ? firstRowID : detailFocusID
@@ -1174,17 +1360,34 @@ struct TVMatchBoardView: View {
     /// reduced strength.
     private var muBackdrop: some View {
         ZStack {
-            theme.boardBG.ignoresSafeArea()
-            if let url = muWallpaperURL {
-                TVMUWallpaperLayer(url: url, dim: 0.82)
-                    .ignoresSafeArea()
-                theme.boardBG.opacity(0.55)
-                    .ignoresSafeArea()
-            }
             LinearGradient(
                 colors: [theme.unitedRed.opacity(0.10), theme.boardBG, .black],
                 startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
+        }
+        // 1.7.6 (FL-439): the wallpaper layer + its wash sit
+        // in this backdrop's BACKGROUND, not its stack — the
+        // same binding as the board root, the picker and the
+        // design centre. As a sibling the photo negotiated
+        // the board/landing stack's size (a taller-than-
+        // stage image pushed the top bar off the edge); as
+        // background content it is sized BY the backdrop.
+        // Dim and wash values unchanged.
+        .background {
+            // The full backdrop stack, in the ORIGINAL
+            // order — boardBG under the photo under its
+            // wash (boardBG is opaque: left as a stack child
+            // above this background it would hide the
+            // photo). With no wallpaper the stack is boardBG
+            // alone, exactly the old first child.
+            ZStack {
+                theme.boardBG
+                if let url = muWallpaperURL {
+                    TVMUWallpaperLayer(url: url, dim: 0.82)
+                    theme.boardBG.opacity(0.55)
+                }
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -1279,13 +1482,6 @@ struct TVMatchBoardView: View {
     /// is the team's initials tile, never a sport glyph.
     private var designCentre: some View {
         ZStack {
-            theme.boardBG.ignoresSafeArea()
-            if let url = muWallpaperURL {
-                TVMUWallpaperLayer(url: url, dim: 0.5)
-                    .ignoresSafeArea()
-                theme.boardBG.opacity(0.35)
-                    .ignoresSafeArea()
-            }
             LinearGradient(
                 colors: [theme.boardBG.opacity(0.6), .clear,
                          theme.boardBG.opacity(0.85)],
@@ -1326,6 +1522,31 @@ struct TVMatchBoardView: View {
             .padding(.horizontal, 100)
             .padding(.top, 28)
             .padding(.bottom, 24)
+        }
+        // 1.7.6 (FL-439): the wallpaper layer is this
+        // surface's BACKGROUND, not a ZStack sibling — the
+        // same binding as the board root and the picker. A
+        // taller-than-stage photo (the set's 4:3 block, the
+        // square crest) inflated the centre's stack exactly
+        // as it did the board's, pushing the design header
+        // off the top edge; as background content the photo
+        // + its boardBG wash are sized BY the surface and
+        // negotiate nothing. Dim and wash values unchanged.
+        .background {
+            // The full backdrop stack, in the ORIGINAL
+            // order — boardBG under the photo under its
+            // wash (boardBG is opaque: left as a ZStack
+            // child it would hide the photo behind it).
+            // With no wallpaper the stack is boardBG alone,
+            // exactly the old first child.
+            ZStack {
+                theme.boardBG
+                if let url = muWallpaperURL {
+                    TVMUWallpaperLayer(url: url, dim: 0.5)
+                    theme.boardBG.opacity(0.35)
+                }
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -1506,17 +1727,30 @@ struct TVMatchBoardView: View {
         }
     }
 
-    /// The scorer lines under the names (FIXED 56 slot):
-    /// the matched state's goals per side, "Name 23'" joined
-    /// — the state's own facts only.
+    /// The scorer lines under the names (FIXED slot): the
+    /// matched state's goals per side, "Name 23'" joined —
+    /// the state's own facts only.
+    /// 1.7.6 (FL-437): the slot also carries each side's
+    /// CARDS — until now the centre rendered goals only, so
+    /// a match's yellow/red cards vanished on this surface
+    /// while every other surface showed them (the owner's
+    /// "Thiếu thông tin thẻ vàng thẻ đỏ"). The dress is the
+    /// app's own TVEventColumns idiom carried into the
+    /// centre: a card chip (r2.5, 12×16, theme.cardY/cardR)
+    /// + "Name minute'" per card, under the side's goals.
+    /// The slot is FIXED at 84 (goals two lines + the card
+    /// line) as a CONSTANT — a state landing on an open
+    /// centre changes contents, never positions (FL-360);
+    /// the no-state form keeps the empty slot exactly as
+    /// before.
     private var centreScorersRow: some View {
         Group {
             if let state = liveEntry.state, liveEntry.teams != nil {
                 HStack(alignment: .top, spacing: 0) {
-                    centreScorerText(state.homeGoals)
+                    centreSideEvents(state: state, isHome: true)
                         .frame(width: 500)
                     Color.clear.frame(width: 420)
-                    centreScorerText(state.awayGoals)
+                    centreSideEvents(state: state, isHome: false)
                         .frame(width: 500)
                 }
                 .frame(maxWidth: .infinity)
@@ -1524,7 +1758,7 @@ struct TVMatchBoardView: View {
                 Color.clear
             }
         }
-        .frame(height: 56)
+        .frame(height: 84)
         .padding(.top, 10)
     }
 
@@ -1535,6 +1769,55 @@ struct TVMatchBoardView: View {
             .foregroundStyle(.white.opacity(0.85))
             .lineLimit(2)
             .multilineTextAlignment(.center)
+    }
+
+    /// One side of the scorer slot: the goals text, then —
+    /// when the side has cards — the card line. The card
+    /// line is a RESERVED 24 pt row inside the fixed slot:
+    /// with no cards it stays empty, so a card landing late
+    /// (the board's FotMob detail upgrade) never moves the
+    /// CTA below. Cap 2 cards + "+N", the TVEventColumns
+    /// collapse carried to a single centred line.
+    private func centreSideEvents(state: MatchState, isHome: Bool) -> some View {
+        let cards = state.events.filter {
+            $0.kind != .goal && $0.isHome == isHome
+        }
+        return VStack(spacing: 4) {
+            centreScorerText(isHome ? state.homeGoals : state.awayGoals)
+            Group {
+                if cards.isEmpty {
+                    Color.clear
+                } else {
+                    HStack(alignment: .center, spacing: 14) {
+                        ForEach(Array(cards.prefix(2).enumerated()),
+                                id: \.offset) { _, event in
+                            HStack(spacing: 6) {
+                                RoundedRectangle(cornerRadius: 2.5)
+                                    .fill(event.kind == .redCard
+                                        ? theme.cardR : theme.cardY)
+                                    .frame(width: 12, height: 16)
+                                Text(event.playerName)
+                                    .font(TVDesignFont.ui(18))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(1)
+                                Text(event.minuteText)
+                                    .font(TVDesignFont.ui(18, .semibold))
+                                    .foregroundStyle(theme.leagueTx)
+                                    .lineLimit(1)
+                            }
+                        }
+                        if cards.count > 2 {
+                            Text("+\(cards.count - 2)")
+                                .font(TVDesignFont.ui(18))
+                                .foregroundStyle(theme.leagueTx)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+            .frame(height: 24)
+        }
     }
 
     /// The ONE red CTA: "▶ Xem trận đấu" + the real counts.
@@ -1598,10 +1881,11 @@ struct TVMatchBoardView: View {
     /// only — the caller gates it): hairline, "Diễn biến",
     /// the track with red progress to the state's own minute
     /// and gold dots at GOAL minutes, each labelled with its
-    /// minute + scorer beneath. Positions are the parsed
-    /// minutes on the 90-minute scale — the shipped band's
-    /// honest scale; no 0'/90' edge labels (the drawing has
-    /// none here).
+    /// minute + scorer beneath — and, since 1.7.6 (FL-437),
+    /// card chips on the track at CARD minutes. Positions
+    /// are the parsed minutes on the 90-minute scale — the
+    /// shipped band's honest scale; no 0'/90' edge labels
+    /// (the drawing has none here).
     private var designTimeline: some View {
         let state = liveEntry.state
         let goals: [(minute: Int, text: String, name: String)] =
@@ -1610,6 +1894,20 @@ struct TVMatchBoardView: View {
                     Self.parsedMinute(event.minuteText).map {
                         (minute: $0, text: event.minuteText,
                          name: event.playerName)
+                    }
+                }
+                .sorted { $0.minute < $1.minute }
+        // 1.7.6 (FL-437): the band's card events — the same
+        // parsed-minute scale, drawn as chips on the track
+        // (the Wally timelineBand's idiom: r2, 8×12,
+        // theme.cardY/cardR, no label; the label band below
+        // stays goals-only, exactly as the band's).
+        let cards: [(minute: Int, red: Bool)] =
+            (state?.events ?? [])
+                .filter { $0.kind != .goal }
+                .compactMap { event in
+                    Self.parsedMinute(event.minuteText).map {
+                        (minute: $0, red: event.kind == .redCard)
                     }
                 }
                 .sorted { $0.minute < $1.minute }
@@ -1640,6 +1938,14 @@ struct TVMatchBoardView: View {
                             .frame(width: 11, height: 11)
                             .position(x: geo.size.width
                                 * CGFloat(min(max(goal.minute, 0), 90)) / 90,
+                                      y: geo.size.height / 2)
+                    }
+                    ForEach(Array(cards.enumerated()), id: \.offset) { _, card in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(card.red ? theme.cardR : theme.cardY)
+                            .frame(width: 8, height: 12)
+                            .position(x: geo.size.width
+                                * CGFloat(min(max(card.minute, 0), 90)) / 90,
                                       y: geo.size.height / 2)
                     }
                 }
@@ -1680,13 +1986,6 @@ struct TVMatchBoardView: View {
     /// 0 with the drawing's empty message.
     private var designBoard: some View {
         ZStack {
-            theme.boardBG.ignoresSafeArea()
-            if let url = muWallpaperURL {
-                TVMUWallpaperLayer(url: url, dim: 0.82)
-                    .ignoresSafeArea()
-                theme.boardBG.opacity(0.55)
-                    .ignoresSafeArea()
-            }
             VStack(alignment: .leading, spacing: 22) {
                 TVDesignHeader()
                 // 1.7.5 (C3 family): the board's back line
@@ -1708,6 +2007,28 @@ struct TVMatchBoardView: View {
             .padding(.horizontal, 100)
             .padding(.top, 28)
             .padding(.bottom, 20)
+        }
+        // 1.7.6 (FL-439): the wallpaper layer + wash are
+        // this board's BACKGROUND — the same binding as the
+        // board root, the picker, the centre and the MU
+        // backdrop. As ZStack siblings they negotiated the
+        // stack's size; as background content they are sized
+        // BY it. Dim and wash values unchanged.
+        .background {
+            // The full backdrop stack, in the ORIGINAL
+            // order — boardBG under the photo under its
+            // wash (boardBG is opaque: left as a ZStack
+            // child it would hide the photo). With no
+            // wallpaper the stack is boardBG alone, exactly
+            // the old first child.
+            ZStack {
+                theme.boardBG
+                if let url = muWallpaperURL {
+                    TVMUWallpaperLayer(url: url, dim: 0.82)
+                    theme.boardBG.opacity(0.55)
+                }
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -1988,6 +2309,23 @@ struct TVMatchBoardView: View {
                     .foregroundStyle(theme.leagueTx)
                     .lineLimit(1)
             }
+            // 1.7.6 (FL-441, RECALC-DABANH RULING 1): the
+            // compact brand wordmark at the bar's right end —
+            // 21 semibold in THIS bar's own face and size,
+            // "Joe" white, " Soccer" in the Wally gold
+            // (theme.accent). It rides the bar's fixed 39 pt
+            // height; the caps keep their place ahead of it
+            // on the open board, and the landing (no caps)
+            // gains the wordmark in the same slot. The gap
+            // after the caps is the ruling's 18 pt: the
+            // bar's own 14 spacing + 4 of leading padding
+            // here (gate Round 1, Lens B — the first pass
+            // shipped the bare 14).
+            (Text("Joe").foregroundStyle(.white)
+                + Text(" Soccer").foregroundStyle(theme.accent))
+                .font(.system(size: 21, weight: .semibold))
+                .lineLimit(1)
+                .padding(.leading, board ? 4 : 0)
         }
         .frame(height: 39)
     }
@@ -2535,6 +2873,18 @@ struct TVMatchBoardView: View {
                     .foregroundStyle(theme.leagueTx)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                // 1.7.6 (FL-441, RECALC-DABANH RULING 1):
+                // the compact brand wordmark at the right
+                // end of the header's first row, LEFT of the
+                // live badge — 21 semibold in this header's
+                // own face, "Joe" white, " Soccer" in the
+                // Classic sky (theme.accent). The row's fixed
+                // 39 pt height (FL-360) already fits it; the
+                // badge keeps its place and its height.
+                (Text("Joe").foregroundStyle(.white)
+                    + Text(" Soccer").foregroundStyle(theme.accent))
+                    .font(.system(size: 21, weight: .semibold))
+                    .lineLimit(1)
                 if let badge = liveEntry.badgeText {
                     Text(badge)
                         .font(.system(size: 25, weight: .bold))
