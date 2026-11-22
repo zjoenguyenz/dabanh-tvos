@@ -474,6 +474,15 @@ struct TVContentView: View {
         return min(592, max(300, (contentWidth - 64) / 3))
     }
 
+    /// 1.7.1: the MU card width (table H5) — 4 across from the
+    /// measured content width: (W − 2×4 rail insets − 3×22
+    /// gaps) / 4, i.e. (W − 74) / 4, clamped to [300, 425].
+    /// Before the first measurement lands, 421 (the 1760-wide
+    /// design value). Published as \.tvMUCardWidth below.
+    private var muCardWidth: CGFloat {
+        contentWidth > 0 ? min(425, max(300, (contentWidth - 74) / 4)) : 421
+    }
+
     var body: some View {
         ZStack {
             background
@@ -520,6 +529,7 @@ struct TVContentView: View {
             .padding(.bottom, 0)
         }
         .environment(\.tvTileWidth, tileWidth)
+        .environment(\.tvMUCardWidth, muCardWidth)
         .environment(\.tvTheme, themeStore.tokens)
         .environmentObject(themeStore)
         .task {
@@ -528,6 +538,23 @@ struct TVContentView: View {
             dataChanged()
         }
         .task { await nuvio.load() }
+        .task(id: theme.id.isMU && themeStore.bgAutoRotate) {
+            // 1.7.1 (table S3): the MU wallpaper auto-rotate —
+            // the round's ONLY functional addition, default OFF
+            // (the theme store persists the toggle). The loop
+            // cycles every 25 s ONLY while the MU theme is
+            // active and the toggle is on; the task's id re-keys
+            // (cancelling the loop) the moment either flips.
+            guard theme.id.isMU && themeStore.bgAutoRotate else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(25))
+                if Task.isCancelled { break }
+                let count = Wallpapers.images().count
+                if count > 1 {
+                    themeStore.cycleBackground(count: count)
+                }
+            }
+        }
         .task(id: snap.muPinEntry?.id) {
             // Pre-resolve the pinned Manchester United fixture
             // (2026-11-19): when a pin exists, its sources are
@@ -794,44 +821,55 @@ struct TVContentView: View {
         }
     }
 
-    /// 1.7.0 MU header (design): ONE row at the classic row's
-    /// height family — club crest + the two-colour UNITEDTV
-    /// wordmark and its tagline on the left, the Theatre of
-    /// Dreams line centred in gold caps, and the app's existing
-    /// clock / dabanh.tv block on the right, recoloured by the
-    /// theme tokens only (same real clock, same texts).
+    /// 1.7.0 MU header, rescaled to the design in 1.7.1
+    /// (table H2): crest 84, wordmark 40, tagline 13 tracked 2
+    /// on two lines, the Theatre of Dreams line 15 tracked 3
+    /// centred on the screen, and the right block = clock 30 +
+    /// the device date — NO "dabanh.tv" under MU. A hairline
+    /// divider sits under the row, inside this VStack, so the
+    /// classic header is untouched.
     private var muHeader: some View {
         // 1.7.0 fix round 1: the Theatre of Dreams line is
         // centred on the SCREEN — the HStack (left block,
         // Spacer, clock block) sits underneath in a ZStack
         // and the centre Text is centred across the full
         // width on top. No focusables are in the header.
-        ZStack {
-            HStack(alignment: .center, spacing: 18) {
-                HStack(alignment: .center, spacing: 14) {
-                    TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 44)
-                    VStack(alignment: .leading, spacing: 2) {
-                        (Text("UNITED").foregroundStyle(.white)
-                            + Text("TV").foregroundStyle(theme.accent))
-                            .font(.system(size: 30, weight: .bold))
-                        Text("THE MATCH. THE MOMENT. UNITED.")
-                            .font(.system(size: 11))
+        VStack(spacing: 0) {
+            ZStack {
+                HStack(alignment: .center, spacing: 18) {
+                    HStack(alignment: .center, spacing: 14) {
+                        TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 84)
+                        VStack(alignment: .leading, spacing: 2) {
+                            (Text("UNITED").foregroundStyle(.white)
+                                + Text("TV").foregroundStyle(theme.accent))
+                                .font(.system(size: 40, weight: .bold))
+                            Text("THE MATCH. THE MOMENT. UNITED.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(theme.leagueTx)
+                                .tracking(2)
+                                .lineLimit(2)
+                                .frame(width: 210, alignment: .leading)
+                        }
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(TVKickoffFormat.time.string(from: Date()))
+                            .font(.system(size: 30))
+                            .foregroundStyle(theme.dashTx)
+                        Text(TVKickoffFormat.muHeaderDateFormatter.string(from: Date()).uppercased())
+                            .font(.system(size: 13))
                             .foregroundStyle(theme.leagueTx)
-                            .tracking(2)
                     }
                 }
-                Spacer()
-                Text(TVKickoffFormat.time.string(from: Date()))
-                    .font(.system(size: 20))
-                    .foregroundStyle(theme.dashTx)
-                Text("dabanh.tv")
-                    .font(.system(size: 20))
-                    .foregroundStyle(theme.leagueTx)
+                Text("◆ THE THEATRE OF DREAMS ◆")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .tracking(3)
             }
-            Text("◆ THE THEATRE OF DREAMS ◆")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.accent)
-                .tracking(2)
+            Rectangle()
+                .fill(Color.white.opacity(0.14))
+                .frame(height: 1)
+                .padding(.top, 10)
         }
     }
 
@@ -1002,29 +1040,14 @@ struct TVContentView: View {
             store.selectedLeague = value
         } label: {
             if theme.id.isMU {
-                // 1.7.0 fix round 1 (FL-360): under MU the
-                // selected label is WHITE BOLD and the pill's
-                // width is reserved at the BOLD width in both
-                // states — a hidden bold copy sizes the ZStack
-                // and the visible copy is overlaid centred, so
-                // selection never changes the pill's width.
-                ZStack {
-                    Text(title)
-                        .font(.system(size: 20, weight: .bold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .opacity(0)
-                    Text(title)
-                        .font(.system(size: 20, weight: selected ? .bold : .medium))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundStyle(selected ? .white : theme.leagueTx)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(TVPillFace(focused: focusedKey == "pill:\(value)",
-                                       selected: selected, theme: theme,
-                                       showsSelectionMarks: true))
+                // 1.7.1 (table H3): under MU the tab is the
+                // design's TEXT tab — TVMUTabFace carries the
+                // whole face (hidden-bold width reservation
+                // included, FL-360), replacing the 1.7.0 capsule
+                // pill face on this arm only.
+                TVMUTabFace(title: title, selected: selected,
+                            focused: focusedKey == "pill:\(value)",
+                            theme: theme)
             } else {
                 Text(title)
                     .font(.system(size: 20, weight: .medium))
@@ -1141,14 +1164,39 @@ struct TVContentView: View {
             // 18 → 10) gives viewport ≈419 against a 390 need.
             // Full count sheet: BUILD-151-REPORT.md.
             VStack(alignment: .leading, spacing: 12) {
-                heroPanel
+                // 1.7.1 (table H1): under MU the hero panel is
+                // NOT rendered — the rails lead the body. The
+                // hero machinery (snapshot, heroFocus, the
+                // heroDetailKey prefetch task) stays wired;
+                // only the panel's rendering is skipped.
+                if !theme.id.isMU { heroPanel }
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 12) {
-                        if !featuredEntries.isEmpty {
-                            featuredRail(featuredEntries)
-                        }
-                        if !live.isEmpty {
-                            railSection("🔴  ĐANG ĐÁ", live)
+                        if theme.id.isMU {
+                            // 1.7.1 (table H7): under MU there is
+                            // no featured rail — the featured
+                            // entries lead the ONE live rail
+                            // (featured ⊂ entries and `live`
+                            // already excludes featuredIDs, so no
+                            // duplicates), each keeping its own
+                            // focus key ("feat:" / "rail:") so
+                            // heroLookup/prefetch behaviour is
+                            // identical.
+                            if !(featuredEntries + live).isEmpty {
+                                TVMUFixtureRail(title: "🔴  ĐANG ĐÁ",
+                                                entries: featuredEntries + live,
+                                                note: nil,
+                                                keyFor: { featuredIDs.contains($0.id) ? "feat:" + $0.id : "rail:" + $0.id },
+                                                onSelect: play,
+                                                onFocusKey: heroFocus)
+                            }
+                        } else {
+                            if !featuredEntries.isEmpty {
+                                featuredRail(featuredEntries)
+                            }
+                            if !live.isEmpty {
+                                railSection("🔴  ĐANG ĐÁ", live)
+                            }
                         }
                         if !cupLive.isEmpty {
                             railSection("🏆  CÚP CHÂU ÂU · ĐANG ĐÁ", cupLive)
@@ -1157,7 +1205,8 @@ struct TVContentView: View {
                             nuvioEventRail("🔴  NUVIO · ĐANG ĐÁ", leagueLiveEvents)
                         }
                         if !upcoming.isEmpty {
-                            railSection("⏰  SẮP ĐÁ", upcoming)
+                            railSection("⏰  SẮP ĐÁ", upcoming,
+                                        muNote: TVKickoffFormat.muRailDateFormatter.string(from: now))
                         }
                         if !leagueUpcomingEvents.isEmpty {
                             nuvioEventRail("⏰  NUVIO · SẮP ĐÁ", leagueUpcomingEvents)
@@ -1223,7 +1272,9 @@ struct TVContentView: View {
     private var cupBody: some View {
         let now = Date()
         VStack(alignment: .leading, spacing: 12) {
-            heroPanel
+            // 1.7.1 (table H1): hero panel skipped under MU —
+            // rendering only, machinery untouched (see scrollBody).
+            if !theme.id.isMU { heroPanel }
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 12) {
                     cupSection(.championsLeague,
@@ -1368,7 +1419,9 @@ struct TVContentView: View {
             Spacer()
         } else {
             VStack(alignment: .leading, spacing: 12) {
-                heroPanel
+                // 1.7.1 (table H1): hero panel skipped under MU —
+                // rendering only, machinery untouched (see scrollBody).
+                if !theme.id.isMU { heroPanel }
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 12) {
                         if !nuvio.liveEvents.isEmpty {
@@ -1397,48 +1450,93 @@ struct TVContentView: View {
     // focus state. The play actions and the copy are unchanged;
     // hero following goes through heroFocus(_:).
 
+    @ViewBuilder
     private func nuvioEventRail(_ title: String, _ items: [NuvioItem]) -> some View {
-        TVNuvioEventRail(title: title, items: items,
-                         onSelect: { item in
-                             playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                         },
-                         onFocusKey: heroFocus)
+        if theme.id.isMU {
+            // 1.7.1 (table H8): the MU rail shell for addon events.
+            TVMUNuvioEventRail(title: title, items: items,
+                               onSelect: { item in
+                                   playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                               },
+                               onFocusKey: heroFocus)
+        } else {
+            TVNuvioEventRail(title: title, items: items,
+                             onSelect: { item in
+                                 playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                             },
+                             onFocusKey: heroFocus)
+        }
     }
 
+    @ViewBuilder
     private func nuvioChannelRail(_ items: [NuvioItem]) -> some View {
-        TVNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
-                           subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
-                           items: items,
-                           onSelect: { item in
-                               playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                           },
-                           onFocusKey: heroFocus)
+        if theme.id.isMU {
+            // 1.7.1 (table H8): the MU rail shell for addon channels.
+            TVMUNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
+                                 subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
+                                 items: items,
+                                 onSelect: { item in
+                                     playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                 },
+                                 onFocusKey: heroFocus)
+        } else {
+            TVNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
+                               subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
+                               items: items,
+                               onSelect: { item in
+                                   playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                               },
+                               onFocusKey: heroFocus)
+        }
     }
 
     /// A folded league tab's addon channel rail (owner,
     /// 2026-11-19 12:58 CST): the league fold's 24/7 channels
     /// below the tab's fixtures — the nuvioChannelRail shape,
     /// with the league's own copy and the card's own play line.
+    @ViewBuilder
     private func leagueChannelRail(_ items: [NuvioItem], league: League) -> some View {
         let copy = leagueChannelCopy(league)
-        return TVNuvioChannelRail(title: copy.railTitle,
-                                  subtitle: copy.railSubtitle,
-                                  items: items,
-                                  detailPrefix: copy.cardPrefix,
-                                  onSelect: { item in
-                                      playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
-                                  },
-                                  onFocusKey: heroFocus)
+        if theme.id.isMU {
+            // 1.7.1 (table H8): the MU rail shell, league copy kept.
+            TVMUNuvioChannelRail(title: copy.railTitle,
+                                 subtitle: copy.railSubtitle,
+                                 items: items,
+                                 detailPrefix: copy.cardPrefix,
+                                 onSelect: { item in
+                                     playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                 },
+                                 onFocusKey: heroFocus)
+        } else {
+            TVNuvioChannelRail(title: copy.railTitle,
+                               subtitle: copy.railSubtitle,
+                               items: items,
+                               detailPrefix: copy.cardPrefix,
+                               onSelect: { item in
+                                   playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                               },
+                               onFocusKey: heroFocus)
+        }
     }
 
     /// The old mirror EN block, unchanged but for its place:
     /// below the addon sections, as the fallback pool.
+    @ViewBuilder
     private var oldENBlock: some View {
-        TVENChannelRail(channels: enChannels,
-                        onSelect: { ch in
-                            playRequest = PlayRequest(resolution: store.resolution(for: ch))
-                        },
-                        onFocusKey: heroFocus)
+        if theme.id.isMU {
+            // 1.7.1 (table H8): the MU rail shell for the old block.
+            TVMUENChannelRail(channels: enChannels,
+                              onSelect: { ch in
+                                  playRequest = PlayRequest(resolution: store.resolution(for: ch))
+                              },
+                              onFocusKey: heroFocus)
+        } else {
+            TVENChannelRail(channels: enChannels,
+                            onSelect: { ch in
+                                playRequest = PlayRequest(resolution: store.resolution(for: ch))
+                            },
+                            onFocusKey: heroFocus)
+        }
     }
 
     // MARK: - Hero
@@ -1777,14 +1875,33 @@ struct TVContentView: View {
     // choice (live → board, else featured/match card) and the
     // tap action are exactly as before.
 
+    @ViewBuilder
     private func featuredRail(_ items: [TVFixtureEntry]) -> some View {
-        TVFixtureRail(title: "⭐  TRẬN NỔI BẬT", entries: items, style: .featured,
-                      onSelect: { play($0) }, onFocusKey: heroFocus)
+        if theme.id.isMU {
+            // 1.7.1 (table H7): under MU there is no featured
+            // rail — the featured entries render inside the MU
+            // live rail (see scrollBody). Classic arm verbatim.
+            EmptyView()
+        } else {
+            TVFixtureRail(title: "⭐  TRẬN NỔI BẬT", entries: items, style: .featured,
+                          onSelect: { play($0) }, onFocusKey: heroFocus)
+        }
     }
 
-    private func railSection(_ title: String, _ items: [TVFixtureEntry]) -> some View {
-        TVFixtureRail(title: title, entries: items, style: .standard,
-                      onSelect: { play($0) }, onFocusKey: heroFocus)
+    /// 1.7.1: `muNote` is the MU rail header's right-aligned
+    /// note (table H4) — only the SẮP ĐÁ call in scrollBody
+    /// passes one (the device date). The classic arm ignores it.
+    @ViewBuilder
+    private func railSection(_ title: String, _ items: [TVFixtureEntry],
+                             muNote: String? = nil) -> some View {
+        if theme.id.isMU {
+            TVMUFixtureRail(title: title, entries: items, note: muNote,
+                            keyFor: { "rail:" + $0.id },
+                            onSelect: play, onFocusKey: heroFocus)
+        } else {
+            TVFixtureRail(title: title, entries: items, style: .standard,
+                          onSelect: { play($0) }, onFocusKey: heroFocus)
+        }
     }
 
     /// 1.5.1 (FL-360): a section label (cup competition,
@@ -1793,11 +1910,19 @@ struct TVContentView: View {
     /// title, ≈86 pt) starved the first rail of exactly the
     /// points the reclaim won back. Every word is preserved;
     /// the label simply rides the rail title row.
+    @ViewBuilder
     private func railSection(_ title: String, _ items: [TVFixtureEntry],
                              sectionLabel: String) -> some View {
-        TVFixtureRail(title: sectionLabel + " · " + title, entries: items,
-                      style: .standard,
-                      onSelect: { play($0) }, onFocusKey: heroFocus)
+        if theme.id.isMU {
+            TVMUFixtureRail(title: sectionLabel + " · " + title, entries: items,
+                            note: nil,
+                            keyFor: { "rail:" + $0.id },
+                            onSelect: play, onFocusKey: heroFocus)
+        } else {
+            TVFixtureRail(title: sectionLabel + " · " + title, entries: items,
+                          style: .standard,
+                          onSelect: { play($0) }, onFocusKey: heroFocus)
+        }
     }
 
     // MARK: - Playing
@@ -1819,6 +1944,79 @@ struct TVContentView: View {
         boardRequest = BoardRequest(entry: entry,
                                     vnSources: store.sources(for: entry.channel),
                                     enItems: attachedNuvioEvents(for: entry))
+    }
+}
+
+/// The MU design text tab (1.7.1, table H3): plain 25 pt text,
+/// no capsule. Selected = white semibold label, a red dot in a
+/// FIXED 8 pt slot before it, a gold outline, and a red
+/// underline bar drawn INSIDE the face's bounds. The face has
+/// a FIXED height of 58 in every state (selected or not,
+/// focused or not); the underline (56×4) sits in an
+/// overlay(alignment: .bottom) with 5 pt bottom padding, fully
+/// inside the frame, so it never paints over the action-pill
+/// row beneath (FL-001 outset fault, fixed in the 1.7.1 fix
+/// round) and never moves the bar's other pills (FL-360).
+/// Unselected = leagueTx medium, no outline. Focused = maroon
+/// fill + gold outline 2.5 pt — this face is the tab's ONE
+/// focus owner under MU. The pill's width is reserved at the
+/// BOLD width in both states (a hidden bold copy sizes the
+/// ZStack), so selection never changes the tab's width.
+private struct TVMUTabFace: View {
+    let title: String
+    let selected: Bool
+    let focused: Bool
+    let theme: TVThemeTokens
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 8) {
+                Circle()
+                    .frame(width: 8, height: 8)
+                    .opacity(0)
+                Text(title)
+                    .font(.system(size: 25, weight: .bold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .opacity(0)
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(theme.unitedRed)
+                    .frame(width: 8, height: 8)
+                    .opacity(selected ? 1 : 0)
+                Text(title)
+                    .font(.system(size: 25, weight: selected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundStyle(selected ? .white : theme.leagueTx)
+            }
+        }
+        .padding(.horizontal, 16)
+        // FIXED height 58 in BOTH states (selected or not,
+        // focused or not): the label content is centred in
+        // this frame and the underline overlays its bottom
+        // edge from INSIDE — nothing paints outside the
+        // face's bounds.
+        .frame(height: 58)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(focused ? theme.tileFocusedBG : .clear)
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(focused ? theme.focusRing
+                                          : (selected ? theme.focusRing : .clear),
+                                  lineWidth: focused ? 2.5 : 1.5)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if selected {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(theme.unitedRed)
+                    .frame(width: 56, height: 4)
+                    .padding(.bottom, 5)
+            }
+        }
     }
 }
 

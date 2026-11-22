@@ -155,6 +155,10 @@ extension EnvironmentValues {
 final class TVThemeStore: ObservableObject {
     @Published private(set) var themeID: TVThemeID
     @Published private(set) var bgIndex: Int
+    /// MU background auto-rotate (1.7.1, spec S3): persisted,
+    /// default OFF — the root's rotation loop reads this and
+    /// cycles only while it is on and the MU theme is current.
+    @Published private(set) var bgAutoRotate: Bool
 
     var tokens: TVThemeTokens { .tokens(for: themeID) }
 
@@ -167,6 +171,8 @@ final class TVThemeStore: ObservableObject {
             themeID = .classic
         }
         bgIndex = max(0, defaults.integer(forKey: "dabanh-mu-bg-index"))
+        // Absent key reads false — auto-rotate starts OFF.
+        bgAutoRotate = defaults.bool(forKey: "dabanh-mu-bg-autorotate")
     }
 
     func select(_ id: TVThemeID) {
@@ -182,97 +188,301 @@ final class TVThemeStore: ObservableObject {
         UserDefaults.standard.set(bgIndex, forKey: "dabanh-mu-bg-index")
         DiagLog.write("theme", "background cycled to \(bgIndex + 1)/\(max(count, 1))")
     }
+
+    /// Persist the MU background auto-rotate switch (1.7.1).
+    func setAutoRotate(_ on: Bool) {
+        bgAutoRotate = on
+        UserDefaults.standard.set(on, forKey: "dabanh-mu-bg-autorotate")
+        DiagLog.write("theme", "background auto-rotate \(on)")
+    }
 }
 
 // MARK: - Picker
 
 /// The full-screen theme picker behind the header's "Giao
-/// diện" pill. Chrome is painted in the CURRENT theme's
-/// tokens; selecting a card applies it at once and dismisses.
+/// diện" pill, rebuilt in 1.7.1 as the design's Giao diện
+/// pane (table S1/S2/S3): header row, title, the two theme
+/// cards SIDE BY SIDE with preview blocks, then the MU
+/// background rows. Chrome is painted in the CURRENT theme's
+/// tokens (the 1.7.0 rule); selecting a card applies it at
+/// once and dismisses. The background rows are always shown —
+/// they steer the MU theme, and are labelled as such.
 struct TVThemePickerView: View {
     @EnvironmentObject private var themeStore: TVThemeStore
     @Environment(\.tvTheme) private var theme
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var focusedTheme: TVThemeID?
+    /// ONE focus owner for the whole surface: the two theme
+    /// cards plus the two background rows.
+    @FocusState private var focusedID: String?
+
+    private static func cardID(_ id: TVThemeID) -> String {
+        "card:" + id.rawValue
+    }
+    private static let bgRowID = "row:bgchange"
+    private static let autoRowID = "row:autorotate"
+
+    /// The current MU wallpaper, if any (same indexing as the
+    /// home background: the shared list in file order, indexed
+    /// by the persisted choice).
+    private var currentWallpaperURL: URL? {
+        let images = Wallpapers.images()
+        guard !images.isEmpty else { return nil }
+        let count = images.count
+        return images[((themeStore.bgIndex % count) + count) % count]
+    }
 
     var body: some View {
         ZStack {
             theme.boardBG.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 36) {
-                Text("Giao diện")
-                    .font(.system(size: 34, weight: .bold))
-                    .foregroundStyle(.white)
-                optionCard(
-                    id: .classic,
-                    title: "Mặc định",
-                    subtitle: "Giao diện gốc của Đá Banh TV")
-                optionCard(
-                    id: .manchesterUnited,
-                    title: "Manchester United",
-                    subtitle: "The Theatre of Dreams · đỏ / đen / vàng")
-                Spacer()
+            // The design's artwork-backed settings: under MU
+            // with a wallpaper, the photo sits under a heavy
+            // boardBG wash.
+            if theme.id.isMU, let url = currentWallpaperURL {
+                TVMUWallpaperLayer(url: url, dim: 0.7)
+                    .ignoresSafeArea()
+                theme.boardBG.opacity(0.4).ignoresSafeArea()
             }
-            .padding(.horizontal, 60)
+            VStack(alignment: .leading, spacing: 30) {
+                headerRow
+                Text("Giao diện")
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundStyle(.white)
+                HStack(spacing: 28) {
+                    optionCard(
+                        id: .classic,
+                        title: "Mặc định",
+                        subtitle: "Giao diện gốc của Đá Banh TV")
+                    optionCard(
+                        id: .manchesterUnited,
+                        title: "Manchester United",
+                        subtitle: "Đỏ United · Đen · Vàng kim")
+                }
+                backgroundSection
+            }
+            .padding(.horizontal, 100)
             .padding(.vertical, 44)
         }
-        .defaultFocus($focusedTheme, themeStore.themeID)
+        .defaultFocus($focusedID, Self.cardID(themeStore.themeID))
         .onExitCommand { dismiss() }
     }
+
+    private var headerRow: some View {
+        ZStack(alignment: .leading) {
+            Text("GIAO DIỆN")
+                .font(.system(size: 20, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(theme.accent)
+                .frame(maxWidth: .infinity, alignment: .center)
+            Text("← Quay lại")
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundStyle(theme.leagueTx)
+        }
+    }
+
+    // MARK: Theme cards
 
     private func optionCard(id: TVThemeID, title: String,
                             subtitle: String) -> some View {
         let selected = themeStore.themeID == id
-        let focused = focusedTheme == id
+        let focused = focusedID == Self.cardID(id)
         return Button {
             themeStore.select(id)
             dismiss()
         } label: {
-            HStack(alignment: .center, spacing: 28) {
-                VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 14) {
+                previewBlock(id: id, selected: selected)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(title)
-                        .font(.system(size: 30, weight: .bold))
+                        .font(.system(size: 28, weight: .bold))
                         .foregroundStyle(.white)
                     Text(subtitle)
-                        .font(.system(size: 22))
+                        .font(.system(size: 20))
                         .foregroundStyle(theme.leagueTx)
-                    if id.isMU {
-                        swatchRow
-                    }
                 }
-                Spacer()
+                .padding(.horizontal, 8)
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(width: 640, height: 300, alignment: .leading)
+            .background(tvCardBackground(focused: focused, theme: theme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(theme.focusRing,
+                                  lineWidth: selected ? 3 : 0))
+        }
+        .tvCardButton()
+        .focused($focusedID, equals: Self.cardID(id))
+    }
+
+    /// The card's preview block (height 150): the selected
+    /// check sits at its top-right, in the CURRENT theme's
+    /// focus colour.
+    private func previewBlock(id: TVThemeID, selected: Bool) -> some View {
+        previewContent(id: id)
+            .frame(maxWidth: .infinity)
+            .frame(height: 150)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(alignment: .topTrailing) {
                 if selected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 34))
+                        .font(.system(size: 30))
                         .foregroundStyle(theme.focusRing)
+                        .padding(12)
                 }
             }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 28)
-            .frame(maxWidth: 1100, alignment: .leading)
-            .background(TVPillFace(focused: focused,
-                                   selected: selected,
+    }
+
+    @ViewBuilder
+    private func previewContent(id: TVThemeID) -> some View {
+        if id.isMU {
+            if let url = Wallpapers.images().first {
+                TVMUWallpaperLayer(url: url, dim: 0)
+            } else {
+                muSwatchComposition
+            }
+        } else {
+            classicSkeleton
+        }
+    }
+
+    /// Classic preview: a navy skeleton composition built
+    /// from the CLASSIC tokens — a boardBG panel carrying
+    /// three tileBG bars (the design's skeleton idiom).
+    private var classicSkeleton: some View {
+        let classic = TVThemeTokens.classic
+        return ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(classic.boardBG)
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array([CGFloat(170), 250, 130].enumerated()),
+                        id: \.offset) { _, width in
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(classic.tileBG)
+                        .frame(width: width, height: 20)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(classic.tileBorder,
+                                              lineWidth: 1))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: .leading)
+            .padding(20)
+        }
+    }
+
+    /// MU preview when the wallpaper list is empty: a maroon
+    /// panel with the gold / red / cream swatches, in the MU
+    /// theme's own tokens.
+    private var muSwatchComposition: some View {
+        let mu = TVThemeTokens.manchesterUnited
+        return ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(mu.tileFocusedBG)
+            HStack(spacing: 12) {
+                ForEach(Array([mu.focusRing, mu.unitedRed,
+                               mu.cream, mu.tileBG].enumerated()),
+                        id: \.offset) { _, colour in
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(colour)
+                        .frame(width: 72, height: 44)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(mu.tileBorder,
+                                              lineWidth: 1.5))
+                }
+            }
+        }
+    }
+
+    // MARK: Background rows (S3)
+
+    private var backgroundSection: some View {
+        let images = Wallpapers.images()
+        let count = images.count
+        let position = count > 0
+            ? ((themeStore.bgIndex % count) + count) % count + 1 : 0
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Hình nền Manchester United")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.white)
+            changeBackgroundRow(count: count, position: position)
+            autoRotateRow
+        }
+    }
+
+    private func changeBackgroundRow(count: Int,
+                                     position: Int) -> some View {
+        Button {
+            themeStore.cycleBackground(count: count)
+        } label: {
+            HStack(alignment: .center, spacing: 16) {
+                Image(systemName: "photo")
+                    .font(.system(size: 24))
+                    .foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Đổi hình nền")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Chuyển sang hình nền tiếp theo · \(position)/\(count)")
+                        .font(.system(size: 19))
+                        .foregroundStyle(theme.leagueTx)
+                }
+                Spacer()
+                Text("›")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(theme.leagueTx)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .frame(maxWidth: 1308, alignment: .leading)
+            .background(TVPillFace(focused: focusedID == Self.bgRowID,
+                                   selected: false,
                                    theme: theme))
         }
         .tvCardButton()
-        .focused($focusedTheme, equals: id)
+        .focused($focusedID, equals: Self.bgRowID)
+        .disabled(count == 0)
     }
 
-    /// The MU card's preview: maroon / gold / red / cream
-    /// swatches in the MU theme's own tokens.
-    private var swatchRow: some View {
-        let mu = TVThemeTokens.manchesterUnited
-        return HStack(spacing: 12) {
-            ForEach(Array([mu.tileFocusedBG, mu.focusRing,
-                           mu.unitedRed, mu.cream].enumerated()),
-                    id: \.offset) { _, colour in
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(colour)
-                    .frame(width: 54, height: 30)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(mu.tileBorder, lineWidth: 1.5))
+    private var autoRotateRow: some View {
+        let on = themeStore.bgAutoRotate
+        return Button {
+            themeStore.setAutoRotate(!on)
+        } label: {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tự động đổi hình nền")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Luân phiên mỗi 25 giây · Luôn phủ tối để dễ đọc")
+                        .font(.system(size: 19))
+                        .foregroundStyle(theme.leagueTx)
+                }
+                Spacer()
+                // The drawn switch: a fixed 64×36 capsule, the
+                // knob sliding inside it — no geometry change
+                // between states.
+                ZStack {
+                    Capsule()
+                        .fill(on ? theme.unitedRed
+                                 : Color.white.opacity(0.18))
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 28, height: 28)
+                        .offset(x: on ? 16 : -16)
+                }
+                .frame(width: 64, height: 36)
+                .animation(.easeInOut(duration: 0.2), value: on)
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .frame(maxWidth: 1308, alignment: .leading)
+            .background(TVPillFace(focused: focusedID == Self.autoRowID,
+                                   selected: false,
+                                   theme: theme))
         }
-        .padding(.top, 4)
+        .tvCardButton()
+        .focused($focusedID, equals: Self.autoRowID)
     }
 }

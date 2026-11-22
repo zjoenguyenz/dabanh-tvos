@@ -43,6 +43,34 @@ enum TVKickoffFormat {
         return f
     }()
 
+    /// Day-only stamp (1.7.1, MU cards): the day part of
+    /// timeDay, for the MU card header's upcoming-day label.
+    static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "dd/MM"
+        return f
+    }()
+
+    /// 1.7.1 MU header date formatter (table H2): the design's
+    /// right block is clock + date — "EEE, dd MMM" in the
+    /// device locale and timezone, uppercased at the call site.
+    static let muHeaderDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "EEE, dd MMM"
+        return f
+    }()
+
+    /// 1.7.1 MU SẮP ĐÁ rail date note (table H4): "EEEE, dd/MM"
+    /// in the device locale and timezone.
+    static let muRailDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "EEEE, dd/MM"
+        return f
+    }()
+
     /// Minutes played for a live match, from the absolute kickoff.
     static func liveMinute(of kickoff: Date, now: Date = Date()) -> Int {
         max(1, Int(now.timeIntervalSince(kickoff) / 60))
@@ -1435,6 +1463,825 @@ struct TVENChannelRail: View {
             FocusSignpost.begin()
             onFocusKey(key)
             Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+// MARK: - MU theme views (1.7.1 — united-tv full layout)
+//
+// Everything below is NEW in 1.7.1 and renders ONLY under the
+// Manchester United theme (the W-B branches in TVContentView
+// select these views when theme.id.isMU). No existing
+// declaration above is modified by this section, so the
+// classic theme's render is untouched. The MU cards share ONE
+// fixed geometry in every state (FL-360): width =
+// tvMUCardWidth (published by the root, ≈421 at the design's
+// 1760 content width), height 272, radius 12, and every
+// interior slot is FIXED — header 40, centre 92, names 56,
+// hairline 1, footer 24 (+8 top padding), vertical padding
+// 16×2, and the flexible spacer taking exactly the remainder:
+// 16 + 40 + 92 + 56 + 19 (spacer) + 1 + 8 + 24 + 16 = 272.
+// Focus is the house cure only: tvCardButton() on the rail
+// buttons and the drawn face (tvMUCardBackground) — no second
+// focus layer, no scaling anywhere.
+
+/// The MU rail card width (1.7.1): the root measures its real
+/// content width and publishes (W − 74) / 4 capped to
+/// 300...425 (≈421 at 1760 — the design's 4-across grid with
+/// 22 pt gaps); the default is the design-width value.
+private struct TVMUCardWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 421
+}
+
+extension EnvironmentValues {
+    var tvMUCardWidth: CGFloat {
+        get { self[TVMUCardWidthKey.self] }
+        set { self[TVMUCardWidthKey.self] = newValue }
+    }
+}
+
+/// The MU card face (1.7.1): radius 12, the focused state is
+/// the maroon gradient (tileFocusedBG → minuteRed at 0.35)
+/// with the gold focus ring drawn INSIDE the bounds
+/// (strokeBorder 3); idle is the flat tileBG with the 1.5 pt
+/// tile border. Beside tvCardBackground, same construction —
+/// the drawn face is the only focus layer.
+func tvMUCardBackground(focused: Bool, theme: TVThemeTokens) -> some View {
+    RoundedRectangle(cornerRadius: 12)
+        .fill(focused
+              ? AnyShapeStyle(LinearGradient(
+                    colors: [theme.tileFocusedBG,
+                             theme.minuteRed.opacity(0.35)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing))
+              : AnyShapeStyle(theme.tileBG))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
+                              lineWidth: focused ? 3 : 1.5))
+}
+
+/// The upcoming-day label the MU card headers share (1.7.1):
+/// today / tomorrow in words, any other day as dd/MM — all in
+/// the device's timezone, like every kickoff stamp in the app.
+@MainActor
+private func tvMUDayLabel(for kickoff: Date, now: Date = Date()) -> String {
+    let calendar = Calendar.current
+    if calendar.isDateInToday(kickoff) { return "HÔM NAY" }
+    if calendar.isDateInTomorrow(kickoff) { return "NGÀY MAI" }
+    return TVKickoffFormat.day.string(from: kickoff)
+}
+
+/// The LIVE line of an MU card header (dot + "LIVE"), shared
+/// by the fixture card and the Nuvio event card so the two
+/// headers can never drift apart.
+private struct TVMULiveLine: View {
+    @Environment(\.tvTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(theme.liveRed)
+                .frame(width: 9, height: 9)
+            Text("LIVE")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(theme.minuteRed)
+                .lineLimit(1)
+        }
+    }
+}
+
+// MARK: MU fixture card
+
+/// One fixture in the MU layout (1.7.1, table H5/H6): the
+/// design's card — league caps + state stack on top, crest |
+/// score-or-kickoff | crest in the fixed centre slot, names
+/// under the crests, and the channel-group / kickoff footer
+/// under a hairline. ONE shape for every fixture state (live,
+/// upcoming, FT, postponed, replay, unmatched): the slots are
+/// fixed and only their contents change (FL-360). No events
+/// block — the design has none on the home card; the same tap
+/// reaches the board, which carries the full info.
+struct TVMUMatchCard: View {
+    @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
+    @Environment(\.tvMUCardWidth) private var cardWidth
+    let entry: TVFixtureEntry
+    let focused: Bool
+
+    /// C1 gold family, the TVLiveBoardView rule.
+    private var isGold: Bool {
+        entry.competition == .championsLeague || entry.competition == .womensChampionsLeague
+    }
+
+    var body: some View {
+        let _ = store.crestsRevision
+        VStack(alignment: .leading, spacing: 0) {
+            headerRow
+            centreRow
+            namesRow
+            Spacer(minLength: 0)
+            Rectangle()
+                .fill(theme.tileBorder)
+                .frame(height: 1)
+            footerRow
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .background(tvMUCardBackground(focused: focused, theme: theme))
+    }
+
+    // Header, FIXED 40: league caps left (gold family for C1),
+    // the state stack right — its slot is the full 40 whether
+    // it carries the live card's two lines or a one-line state,
+    // so FT / upcoming cards align with live ones.
+    private var headerRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(entry.competitionLabel)
+                .font(.system(size: 15, weight: .bold))
+                .tracking(1.5)
+                .foregroundStyle(isGold ? theme.c1Label : theme.leagueTx)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 2) {
+                headerState
+            }
+        }
+        .frame(height: 40, alignment: .top)
+    }
+
+    @ViewBuilder
+    private var headerState: some View {
+        let now = Date()
+        if entry.isLive {
+            TVMULiveLine()
+            Text(entry.state?.minuteText ?? entry.badgeText ?? "")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+        } else if entry.state?.status == .ft {
+            Text("FT")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+        } else if entry.state?.status == .postponed || entry.state?.status == .cancelled {
+            Text("HOÃN")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(.gray)
+                .lineLimit(1)
+        } else if let kickoff = entry.channel.kickoff, kickoff > now {
+            Text(tvMUDayLabel(for: kickoff, now: now))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.amber)
+                .lineLimit(1)
+        } else if let kickoff = entry.channel.kickoff,
+                  LeagueClassifier.bucket(of: entry.channel, now: now) == 3 {
+            // Bucket 3 and not FT: a finished listing with no
+            // matched state — a replay, never a live guess.
+            Text("PHÁT LẠI")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .lineLimit(1)
+        }
+    }
+
+    // Centre, FIXED 92: crest 92 | centre slot FIXED 150 |
+    // crest 92. A non-fixture entry centres its channel logo
+    // in the same slot instead.
+    private var centreRow: some View {
+        Group {
+            if entry.teams != nil {
+                HStack(alignment: .center, spacing: 0) {
+                    TVCrestImage(url: entry.displayCrests?.0 ?? nil, size: 92)
+                        .frame(width: 92)
+                    Spacer(minLength: 0)
+                    centreSlot
+                    Spacer(minLength: 0)
+                    TVCrestImage(url: entry.displayCrests?.1 ?? nil, size: 92)
+                        .frame(width: 92)
+                }
+            } else {
+                TVChannelLogo(channel: entry.channel, height: 84)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 92)
+    }
+
+    @ViewBuilder
+    private var centreSlot: some View {
+        if let state = entry.state, let h = state.scoreHome, let a = state.scoreAway {
+            // One string, digits + colon together (the design's
+            // colon is white, not the dash colour), scaled
+            // inside the fixed slot if a rare 2-digit score
+            // overflows it — the slot itself never moves.
+            Text("\(h) : \(a)")
+                .font(.system(size: 44, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 150)
+        } else if let kickoff = entry.channel.kickoff, kickoff > Date() {
+            Text(TVKickoffFormat.time.string(from: kickoff))
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(width: 150)
+        } else {
+            Text("VS")
+                .font(.system(size: 30, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.45))
+                .lineLimit(1)
+                .frame(width: 150)
+        }
+    }
+
+    // Names, FIXED 56: each name centred under its crest (the
+    // 150 centre spacer keeps the two columns over the centre
+    // row's), or the cleaned title centred for a non-fixture.
+    private var namesRow: some View {
+        Group {
+            if let teams = entry.teams {
+                HStack(alignment: .center, spacing: 0) {
+                    Text(teams.0)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                    Color.clear.frame(width: 150, height: 1)
+                    Text(teams.1)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                Text(entry.cleanTitle)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 56)
+    }
+
+    // Footer, FIXED 24 (+8 top padding): the representative
+    // channel's group (the classic meta line's datum; the
+    // cleaned title when the group is empty) and the
+    // device-local kickoff — shown for live entries too, as
+    // the design draws it.
+    private var footerRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(entry.channel.group.isEmpty ? entry.cleanTitle : entry.channel.group)
+                .font(.system(size: 19))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let kickoff = entry.channel.kickoff {
+                Text("KO " + TVKickoffFormat.time.string(from: kickoff))
+                    .font(.system(size: 19))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 24)
+        .padding(.top, 8)
+    }
+}
+
+// MARK: MU rail header + fixture rail
+
+/// The MU rail header (1.7.1, table H4): title 34 bold, the
+/// rail's real count as a "%02d" chip in the accent family,
+/// and an optional right-aligned note (the SẮP ĐÁ rail's
+/// device date — W-B passes it). FIXED height 50.
+struct TVMURailHeader: View {
+    @Environment(\.tvTheme) private var theme
+    let title: String
+    let count: Int
+    var note: String? = nil
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Text(title)
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Text(String(format: "%02d", count))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(theme.accent.opacity(0.6), lineWidth: 1.5))
+            Spacer(minLength: 0)
+            if let note {
+                Text(note)
+                    .font(.system(size: 17))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 50)
+    }
+}
+
+/// One horizontal rail of MU fixture cards (1.7.1): the MU
+/// header over a LazyHStack of TVMUMatchCards at the design's
+/// 22 pt gap. The card slot is 280 FIXED (272 + 2×4 insets)
+/// for every state — one card shape, no live-dependent slot.
+/// Focus lives here, at the leaf, exactly as TVFixtureRail's
+/// (KH-2): own @FocusState, keys reported upward, signposted.
+struct TVMUFixtureRail: View {
+    let title: String
+    let entries: [TVFixtureEntry]
+    var note: String? = nil
+    let keyFor: (TVFixtureEntry) -> String
+    let onSelect: (TVFixtureEntry) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVMURailHeader(title: title, count: entries.count, note: note)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(entries) { entry in
+                        Button {
+                            onSelect(entry)
+                        } label: {
+                            TVMUMatchCard(entry: entry,
+                                          focused: focus == keyFor(entry))
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: keyFor(entry))
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+// MARK: MU Nuvio event card + rail
+
+/// One addon event in the MU layout (1.7.1, table H8): the
+/// design card's frame and slots, fed by the NuvioItem — the
+/// classic NuvioEventCard's data fallbacks in the MU interior.
+/// The addon carries NO score a card may show, so the centre
+/// slot is the kickoff clock (or "VS"); a live event carries
+/// the LIVE line + the meta's own releaseInfo in the header's
+/// right stack. A team-less item draws its poster art in the
+/// centre slot (the soccer placeholder while it loads, and
+/// when the meta carries no poster at all).
+struct TVMUNuvioEventCard: View {
+    @Environment(\.tvTheme) private var theme
+    @Environment(\.tvMUCardWidth) private var cardWidth
+    let item: NuvioItem
+    let focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerRow
+            centreRow
+            namesRow
+            Spacer(minLength: 0)
+            Rectangle()
+                .fill(theme.tileBorder)
+                .frame(height: 1)
+            footerRow
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .background(tvMUCardBackground(focused: focused, theme: theme))
+    }
+
+    // Header, FIXED 40: the meta's league caps (the addon's
+    // own fallback word when it carries none), the state
+    // stack right — live line + releaseInfo for a live event,
+    // the upcoming day label for one to come.
+    private var headerRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text((item.league ?? "NUVIO").uppercased())
+                .font(.system(size: 15, weight: .bold))
+                .tracking(1.5)
+                .foregroundStyle(theme.leagueTx)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 2) {
+                if item.kind == .liveEvent {
+                    TVMULiveLine()
+                    Text(item.releaseInfo)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(1)
+                } else if item.kind == .upcomingEvent, let kickoff = item.kickoff {
+                    Text(tvMUDayLabel(for: kickoff))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.amber)
+                        .lineLimit(1)
+                } else if item.kind == .upcomingEvent, !item.releaseInfo.isEmpty {
+                    // No parsed kickoff: the meta's own clock
+                    // text, the classic card's fallback datum.
+                    Text(item.releaseInfo)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.amber)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .frame(height: 40, alignment: .top)
+    }
+
+    // Centre, FIXED 92: crest pair + kickoff slot for a
+    // fixture meta; the poster's own art, centred, otherwise.
+    private var centreRow: some View {
+        Group {
+            if item.teams != nil {
+                HStack(alignment: .center, spacing: 0) {
+                    TVCrestImage(url: item.team1Logo.flatMap(URL.init(string:)), size: 92)
+                        .frame(width: 92)
+                    Spacer(minLength: 0)
+                    centreSlot
+                    Spacer(minLength: 0)
+                    TVCrestImage(url: item.team2Logo.flatMap(URL.init(string:)), size: 92)
+                        .frame(width: 92)
+                }
+            } else if !item.poster.isEmpty, let url = URL(string: item.poster) {
+                TVCachedImage(url: url, placeholderSize: 46)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 92)
+            } else {
+                TVSoccerPlaceholder(size: 46)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 92)
+            }
+        }
+        .frame(height: 92)
+    }
+
+    @ViewBuilder
+    private var centreSlot: some View {
+        if let kickoff = item.kickoff {
+            Text(TVKickoffFormat.time.string(from: kickoff))
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(width: 150)
+        } else {
+            Text("VS")
+                .font(.system(size: 30, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.45))
+                .lineLimit(1)
+                .frame(width: 150)
+        }
+    }
+
+    // Names, FIXED 56: the two sides under their crests, or
+    // the item's display name centred for a team-less meta.
+    private var namesRow: some View {
+        Group {
+            if let teams = item.teams {
+                HStack(alignment: .center, spacing: 0) {
+                    Text(teams.0)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                    Color.clear.frame(width: 150, height: 1)
+                    Text(teams.1)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                Text(item.displayName)
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 56)
+    }
+
+    // Footer, FIXED 24 (+8 top padding): a fixture meta
+    // repeats its display name on the left (the design's
+    // channel-line slot; a team-less meta leaves it empty —
+    // its name already fills the names row), the kickoff on
+    // the right when the meta carries one.
+    private var footerRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(item.teams != nil ? item.displayName : "")
+                .font(.system(size: 19))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let kickoff = item.kickoff {
+                Text("KO " + TVKickoffFormat.time.string(from: kickoff))
+                    .font(.system(size: 19))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 24)
+        .padding(.top, 8)
+    }
+}
+
+/// One horizontal rail of MU Nuvio EVENT cards (1.7.1):
+/// TVNuvioEventRail's signature and focus pattern, the MU
+/// header and cards, the design's 22 pt gap, slot 280 FIXED.
+struct TVMUNuvioEventRail: View {
+    let title: String
+    let items: [NuvioItem]
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVMURailHeader(title: title, count: items.count)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            TVMUNuvioEventCard(item: item,
+                                               focused: focus == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+// MARK: MU channel cards + rails
+
+/// The shared face of the two MU channel cards (1.7.1, table
+/// H8): a 24/7 channel has no fixture geometry, so the design
+/// card's centre slot carries the channel's logo art (the tv
+/// glyph when it has none), the name sits in the names slot,
+/// and the footer's left is the card's detail line. Same
+/// fixed slots as the fixture card — the height arithmetic in
+/// the section header above holds verbatim.
+private struct TVMUChannelCardFace: View {
+    @Environment(\.tvTheme) private var theme
+    @Environment(\.tvMUCardWidth) private var cardWidth
+    let headerLabel: String
+    let name: String
+    let detail: String
+    /// The channel whose logo art fills the centre slot; nil
+    /// draws the tv glyph (the classic cards' fallback).
+    let logoChannel: Channel?
+    let focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(headerLabel)
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(1.5)
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("24/7")
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundStyle(theme.accent)
+                    .lineLimit(1)
+            }
+            .frame(height: 40)
+            Group {
+                if let logoChannel {
+                    TVChannelLogo(channel: logoChannel, height: 84)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Image(systemName: "tv")
+                        .font(.system(size: 64))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .frame(height: 92)
+            Text(name)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+            Spacer(minLength: 0)
+            Rectangle()
+                .fill(theme.tileBorder)
+                .frame(height: 1)
+            HStack(alignment: .center, spacing: 12) {
+                Text(detail)
+                    .font(.system(size: 19))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(height: 24)
+            .padding(.top, 8)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .background(tvMUCardBackground(focused: focused, theme: theme))
+    }
+}
+
+/// One addon 24/7 channel in the MU layout (1.7.1): the
+/// classic NuvioChannelCard's data (poster-as-logo via the
+/// display channel, the league-extended detail line) in the
+/// shared MU channel face.
+struct TVMUNuvioChannelCard: View {
+    let item: NuvioItem
+    let focused: Bool
+    var detailPrefix: String = "Kênh tiếng Anh"
+
+    var body: some View {
+        TVMUChannelCardFace(
+            headerLabel: "KÊNH 24/7",
+            name: item.displayName,
+            detail: item.league.map { "\(detailPrefix) · \($0)" }
+                ?? "\(detailPrefix) · phát liên tục",
+            logoChannel: item.poster.isEmpty ? nil : item.displayChannel,
+            focused: focused)
+    }
+}
+
+/// One old-block English channel in the MU layout (1.7.1):
+/// the classic TVENChannelCard's label and detail line in
+/// the shared MU channel face.
+struct TVMUENChannelCard: View {
+    let channel: Channel
+    let focused: Bool
+
+    var body: some View {
+        TVMUChannelCardFace(
+            headerLabel: "24/7 · BLV ANH",
+            name: TVEnglish.displayName(channel),
+            detail: "Kênh tiếng Anh · phát liên tục",
+            logoChannel: channel.logoURL == nil ? nil : channel,
+            focused: focused)
+    }
+}
+
+/// One horizontal rail of MU Nuvio CHANNEL cards (1.7.1):
+/// TVNuvioChannelRail's signature — optional subtitle and
+/// detailPrefix included — with the MU header and cards.
+struct TVMUNuvioChannelRail: View {
+    let title: String
+    var subtitle: String? = nil
+    let items: [NuvioItem]
+    var detailPrefix: String? = nil
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVMURailHeader(title: title, count: items.count)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 22))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            if let detailPrefix {
+                                TVMUNuvioChannelCard(item: item,
+                                                     focused: focus == "nv:" + item.id,
+                                                     detailPrefix: detailPrefix)
+                            } else {
+                                TVMUNuvioChannelCard(item: item,
+                                                     focused: focus == "nv:" + item.id)
+                            }
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// The old mirror EN block's rail in the MU layout (1.7.1):
+/// TVENChannelRail's title and subtitle verbatim, the MU
+/// header and cards, the same focus pattern.
+struct TVMUENChannelRail: View {
+    let channels: [Channel]
+    let onSelect: (Channel) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVMURailHeader(title: "🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH",
+                           count: channels.count)
+            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(channels) { ch in
+                        Button {
+                            onSelect(ch)
+                        } label: {
+                            TVMUENChannelCard(channel: ch,
+                                              focused: focus == "en:" + ch.url)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "en:" + ch.url)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+// MARK: MU wallpaper layer
+
+/// The MU wallpaper as a reusable layer (1.7.1): ONE photo,
+/// decoded DOWNSAMPLED (the TVWallpaperView pattern — some
+/// wallpapers are 8002 px wide and must never decode at full
+/// size), scaled to fill, under a flat black scrim of the
+/// caller's strength. The caller frames it — no
+/// ignoresSafeArea in here. Loads in .task(id:) — no work on
+/// any focus path (FL-128).
+struct TVMUWallpaperLayer: View {
+    let url: URL
+    let dim: Double
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+            Color.black.opacity(dim)
+        }
+        .clipped()
+        .task(id: url) {
+            image = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
         }
     }
 }
