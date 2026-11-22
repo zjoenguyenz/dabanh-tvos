@@ -764,11 +764,12 @@ final class NuvioStore: ObservableObject {
     // MARK: - Playback resolution
 
     /// The resolve numbers are the playlist store's own
-    /// (PlaylistStore.runResolve): quorum 3, soft deadline
-    /// 6 s, hard cap 15 s; cache TTL 60 s doubling to a
-    /// 600 s cap on healthy re-resolves, ~30 s negatives.
-    private static let resolveQuorum = 3
-    private static let resolveSoftDeadline: TimeInterval = 6
+    /// (PlaylistStore.runResolve): since 1.6.0 the web
+    /// player's gate — first verified releases at once, soft
+    /// deadline 3 s, hard cap 15 s, the SourceHealth memory
+    /// consulted and fed identically; cache TTL 60 s doubling
+    /// to a 600 s cap on healthy re-resolves, ~30 s negatives.
+    private static let resolveSoftDeadline: TimeInterval = 3
     private static let resolveHardCap: TimeInterval = 15
     private static let resolveBaseTTL: TimeInterval = 60
     private static let resolveMaxTTL: TimeInterval = 600
@@ -792,7 +793,10 @@ final class NuvioStore: ObservableObject {
     /// fixture open, keyed by meta id instead of fixture.
     func resolution(for item: NuvioItem) -> MatchResolution {
         if let entry = freshCacheEntry(forKey: item.id) {
-            return MatchResolution.completed(entry.sources)
+            // 1.6.0: as in the playlist store, a replayed ladder
+            // answers to the health memory — fresh-dead rungs
+            // walk at the tail (SourceHealth.order).
+            return MatchResolution.completed(SourceHealth.order(entry.sources))
         }
         if let flight = resolutionInFlight[item.id] {
             return flight
@@ -877,49 +881,100 @@ final class NuvioStore: ObservableObject {
         }
         let started = Date()
         var verdicts: [Int: MatchVerdict] = [:]
+        var latencies: [Int: Int] = [:]
+        // 1.6.0: the health memory is consulted before any
+        // probe is spent, exactly as in PlaylistStore.runResolve
+        // — fresh-dead streams are not probed again and walk at
+        // the tail; an all-dead ladder probes everything.
+        var healthDead = Set(
+            ladder.indices.filter { SourceHealth.isDead(ladder[$0].url) })
+        if healthDead.count == ladder.count { healthDead = [] }
+        let probeCount = ladder.count - healthDead.count
         let softDeadline = Self.resolveSoftDeadline
         let hardCap = Self.resolveHardCap
-        await withTaskGroup(of: (Int, MatchVerdict?).self) { group in
-            for (i, ch) in ladder.enumerated() {
-                group.addTask { (i, await StreamVerifier.verify(ch)) }
+        var presented = false
+        var gateReason = "hard"
+        await withTaskGroup(of: (Int, MatchVerdict?, Int).self) { group in
+            for (i, ch) in ladder.enumerated() where !healthDead.contains(i) {
+                group.addTask {
+                    let t0 = Date()
+                    let verdict = await StreamVerifier.verify(ch)
+                    return (i, verdict, Int(Date().timeIntervalSince(t0) * 1000))
+                }
             }
             group.addTask {
                 try? await Task.sleep(for: .seconds(softDeadline))
-                return (-2, nil)
+                return (-2, nil, 0)
             }
             group.addTask {
                 try? await Task.sleep(for: .seconds(hardCap))
-                return (-1, nil)
+                return (-1, nil, 0)
             }
-            var presented = false
-            for await (i, verdict) in group {
+            for await (i, verdict, ms) in group {
                 if i == -1 { break } // hard cap: stop collecting
-                if i >= 0, let verdict { verdicts[i] = verdict }
+                if i >= 0, let verdict {
+                    verdicts[i] = verdict
+                    latencies[i] = ms
+                    SourceHealth.record(verdict: verdict, url: ladder[i].url,
+                                        latencyMs: ms)
+                }
+                let wasPresented = presented
                 if !presented {
-                    let verified = Self.verifiedSources(ladder: ladder, verdicts: verdicts)
-                    let settled = verdicts.count == ladder.count
-                    let quorum = verified.count >= Self.resolveQuorum
-                    let softPassed = Date().timeIntervalSince(started) >= Self.resolveSoftDeadline
-                    if !verified.isEmpty && (quorum || softPassed || settled) {
+                    let verified = Self.verifiedSources(ladder: ladder, verdicts: verdicts,
+                                                        latencies: latencies)
+                    let settled = verdicts.count == probeCount
+                    let softPassed = Date().timeIntervalSince(started) >= softDeadline
+                    if !verified.isEmpty {
+                        gateReason = settled ? "settled" : "first-ok"
                         res.publish(verified)
                         presented = true
+                        DiagLog.write("resolve", Self.gateLine(
+                            reason: gateReason, ladder: ladder, published: verified,
+                            verdicts: verdicts, latencies: latencies))
+                    } else if softPassed || settled {
+                        let head = Self.finalSources(ladder: ladder, verdicts: verdicts,
+                                                     latencies: latencies,
+                                                     healthDead: healthDead)
+                        if !head.isEmpty {
+                            gateReason = settled ? "settled" : "soft"
+                            res.publish(head)
+                            presented = true
+                            DiagLog.write("resolve", Self.gateLine(
+                                reason: gateReason, ladder: ladder, published: head,
+                                verdicts: verdicts, latencies: latencies))
+                        }
                     }
                 }
-                if verdicts.count == ladder.count { break }
+                if wasPresented, i >= 0, let verdict, case .verified = verdict {
+                    // Fix round (review A2): a verified rung
+                    // landing after the first publish joins the
+                    // ladder at once — the surface may already
+                    // have burned through the published subset,
+                    // and it must not idle beside a proven rung
+                    // until every straggler settles.
+                    res.publish(Self.finalSources(ladder: ladder, verdicts: verdicts,
+                                                  latencies: latencies,
+                                                  healthDead: healthDead))
+                }
+                if verdicts.count == probeCount { break }
             }
             group.cancelAll()
         }
         // The finished ladder mirrors PlaylistStore's: verified
-        // rungs in candidate order, then the blind tier;
-        // definitively dead rungs never appear.
-        var final: [ResolvedSource] = Self.verifiedSources(ladder: ladder, verdicts: verdicts)
-        for (i, ch) in ladder.enumerated() {
-            switch verdicts[i] {
-            case .verified, .dead:
-                break
-            case .keptBlind, .failedTransient, nil:
-                final.append(ResolvedSource(channel: ch, quality: nil, verified: false))
-            }
+        // rungs fastest-first, then the blind tier, then the
+        // health-dead tail; definitively dead rungs never appear.
+        let final: [ResolvedSource] = Self.finalSources(
+            ladder: ladder, verdicts: verdicts, latencies: latencies,
+            healthDead: healthDead)
+        if !presented {
+            // Fix round (review A3): an all-probed-dead resolve
+            // settles without ever presenting — its exit is
+            // "settled", not the hard cap the initial value
+            // would have claimed.
+            DiagLog.write("resolve", Self.gateLine(
+                reason: verdicts.count == probeCount ? "settled" : gateReason,
+                ladder: ladder, published: final,
+                verdicts: verdicts, latencies: latencies))
         }
         let verifiedCount = verdicts.values.filter {
             if case .verified = $0 { return true }
@@ -943,12 +998,66 @@ final class NuvioStore: ObservableObject {
         }
     }
 
+    /// The verified rungs so far, fastest first — the same
+    /// latency ordering as PlaylistStore.verifiedSources (1.6.0).
     private static func verifiedSources(ladder: [Channel],
-                                        verdicts: [Int: MatchVerdict]) -> [ResolvedSource] {
-        ladder.enumerated().compactMap { i, _ in
+                                        verdicts: [Int: MatchVerdict],
+                                        latencies: [Int: Int]) -> [ResolvedSource] {
+        ladder.enumerated().compactMap { i, _ -> (Int, ResolvedSource)? in
             guard case .verified(let ch, let quality)? = verdicts[i] else { return nil }
-            return ResolvedSource(channel: ch, quality: quality, verified: true)
+            return (i, ResolvedSource(channel: ch, quality: quality, verified: true))
         }
+        .sorted { a, b in
+            let la = latencies[a.0] ?? Int.max
+            let lb = latencies[b.0] ?? Int.max
+            return la != lb ? la < lb : a.0 < b.0
+        }
+        .map { $0.1 }
+    }
+
+    /// The finished ladder — PlaylistStore.finalSources' twin:
+    /// verified fastest-first, the blind tier in candidate
+    /// order, then the health-dead tail.
+    private static func finalSources(ladder: [Channel],
+                                     verdicts: [Int: MatchVerdict],
+                                     latencies: [Int: Int],
+                                     healthDead: Set<Int>) -> [ResolvedSource] {
+        var out = verifiedSources(ladder: ladder, verdicts: verdicts,
+                                  latencies: latencies)
+        for (i, ch) in ladder.enumerated() where !healthDead.contains(i) {
+            switch verdicts[i] {
+            case .verified, .dead:
+                break
+            case .keptBlind, .failedTransient, nil:
+                out.append(ResolvedSource(channel: ch, quality: nil, verified: false))
+            }
+        }
+        for (i, ch) in ladder.enumerated() where healthDead.contains(i) {
+            out.append(ResolvedSource(channel: ch, quality: nil, verified: false))
+        }
+        return out
+    }
+
+    /// The gate line — PlaylistStore.gateLine's twin (Sony
+    /// 2.29's shape; hosts only).
+    private static func gateLine(reason: String, ladder: [Channel],
+                                 published: [ResolvedSource],
+                                 verdicts: [Int: MatchVerdict],
+                                 latencies: [Int: Int]) -> String {
+        let verifiedCount = verdicts.values.filter {
+            if case .verified = $0 { return true }
+            return false
+        }.count
+        guard let winner = published.first,
+              let wi = ladder.firstIndex(where: { $0.url == winner.channel.url })
+        else {
+            return "gate reason=\(reason) winner=- latency=- "
+                + "verified=\(verifiedCount) ladder=\(published.count)"
+        }
+        return "gate reason=\(reason) "
+            + "winner=\(URL(string: winner.channel.url)?.host ?? "?") "
+            + "latency=\(latencies[wi] ?? -1) "
+            + "verified=\(verifiedCount) ladder=\(published.count)"
     }
 }
 

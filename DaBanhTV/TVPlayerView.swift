@@ -49,6 +49,10 @@ struct TVPlayerView: View {
     /// tap's order, so the pick is steered at the surface).
     @State private var startURL: String?
     @State private var switchOpen = false
+    /// 1.6.0 (web standard, point 4): the session has already
+    /// crossed VN↔EN once on ladder exhaustion — the slate is
+    /// allowed only after that, never a ping-pong.
+    @State private var autoCrossUsed = false
     @FocusState private var switchFocus: String?
     let switchContext: TVSwitchContext?
 
@@ -65,6 +69,7 @@ struct TVPlayerView: View {
                           showsSwitchButton: switchContext != nil,
                           onSwitchButton: { openSwitch() },
                           onPlayingURL: { playingURL = $0 },
+                          onExhausted: { handleExhaustion() },
                           startURL: startURL,
                           surfaceLocked: switchOpen,
                           launchedViaSwitch: session > 0)
@@ -85,6 +90,37 @@ struct TVPlayerView: View {
             } else {
                 dismiss()
             }
+        }
+        // 1.6.0: the launch instant, stamped so a session's
+        // tap→first-frame time is the difference between this
+        // line and the surface's first-frame line in DiagLog
+        // (both carry timestamps) — the install session reads
+        // the standard's headline number from the log alone.
+        .onAppear { DiagLog.write("player", "session presented") }
+    }
+
+    /// The active ladder is exhausted (1.6.0, web standard —
+    /// point 4): the no-signal slate is only for when the
+    /// MATCH's pool is exhausted, and a board session's pool
+    /// spans both sections of its board. A VN session whose
+    /// ladder dies therefore crosses to the first EN item, and
+    /// an EN session that resolves empty or dies crosses to
+    /// the VN ladder's head — once per session (Sony 2.29's B1
+    /// was this same hole in one direction, graded BLOCKER
+    /// there). Direct launches carry no context and keep the
+    /// slate exactly as before.
+    private func handleExhaustion() {
+        guard let ctx = switchContext, !autoCrossUsed else { return }
+        if let activeENItemID {
+            guard let first = ctx.vnSources.first else { return }
+            autoCrossUsed = true
+            DiagLog.write("player", "ladder exhausted — auto-cross EN→VN (was item=\(activeENItemID))")
+            pickVN(first, in: ctx)
+        } else {
+            guard let first = ctx.enItems.first else { return }
+            autoCrossUsed = true
+            DiagLog.write("player", "ladder exhausted — auto-cross VN→EN item=\(first.id)")
+            pickEN(first, in: ctx)
         }
     }
 
@@ -284,6 +320,10 @@ private struct PlayerSurface: View {
     var showsSwitchButton: Bool = false
     var onSwitchButton: (() -> Void)? = nil
     var onPlayingURL: ((String?) -> Void)? = nil
+    /// Fired once, at the moment the ladder settles exhausted
+    /// (1.6.0): the shell decides whether the match's pool is
+    /// really spent (cross VN↔EN) or the slate stands.
+    var onExhausted: (() -> Void)? = nil
     /// A VN pick from the switch overlay (v1.4.1): the rung
     /// this surface must start on. The store's resolution is
     /// fixture-keyed — its ladder keeps the ORIGINAL tap's
@@ -379,6 +419,21 @@ private struct PlayerSurface: View {
     /// and after a failure (via advance). With no untried rung,
     /// the ladder being finished is what makes the failure final.
     private func pump() {
+        // 1.6.0 fix round (review A1): a republication can REMOVE
+        // the rung this surface is trying — a blind-published
+        // rung whose probe later proves it dead drops out of the
+        // ladder, its controller is dismantled with it, and no
+        // failure event ever fires; without this check every
+        // pump() then returned at the guard below and the
+        // session hung on the loading capsule until Menu. A
+        // vanished rung IS a failed rung: advance. (Removal is
+        // only ever a proven-dead verdict — verified rungs stay
+        // verified, blind rungs stay until their verdict lands.)
+        if let url = currentURL,
+           !resolution.sources.contains(where: { $0.channel.url == url }) {
+            advance()
+            return
+        }
         guard !exhausted, currentURL == nil else { return }
         // A switch pick outranks the ladder's own order: the
         // picked rung plays first; the rest of the ladder
@@ -409,6 +464,7 @@ private struct PlayerSurface: View {
             switching = true
         } else if resolution.finished {
             exhausted = true
+            onExhausted?()
         } else {
             switching = true
         }
@@ -435,6 +491,10 @@ private struct PlayerSurface: View {
         let kind = tried.isEmpty
             ? (launchedViaSwitch ? "switch" : "initial")
             : "advance"
+        // 1.6.0: a rung that actually played is a proven-good
+        // URL — the health memory hears it from the player
+        // itself, not only from the verifier.
+        SourceHealth.record(url, .ok, latencyMs: ms)
         DiagLog.write("player", "first-frame \(ms) ms kind=\(kind) "
             + "host=\(URL(string: url)?.host ?? "?")")
     }
@@ -442,6 +502,11 @@ private struct PlayerSurface: View {
     private func advance() {
         if let currentURL {
             tried.insert(currentURL)
+            // 1.6.0 (FL-355): the failure is recorded in the
+            // health memory, not only in the log — the next
+            // resolve of this fixture demotes the URL instead
+            // of re-proving it from zero.
+            SourceHealth.record(currentURL, .dead)
             // KH-1: player failures are a required log event —
             // host only, never the full URL (DiagLog scrubs
             // regardless; callers still log hosts, not links).
@@ -810,7 +875,7 @@ private struct PlayerController: UIViewControllerRepresentable {
         let player = AVPlayer(playerItem: item)
         controller.player = player
         controller.view.isUserInteractionEnabled = !interactionLocked
-        context.coordinator.observe(item)
+        context.coordinator.observe(item, player: player)
         installSwitchMenuItem(in: controller)
         player.play()
         return controller
@@ -892,12 +957,41 @@ private struct PlayerController: UIViewControllerRepresentable {
         private let onReady: () -> Void
         private var fired = false
 
+        // MARK: Stall watchdog (1.6.0, web standard / FL-355)
+        //
+        // The item's own failure events convict only failures
+        // the ITEM reports. A server that accepts the connection
+        // and never sends fails nothing — the item sits in
+        // .unknown forever — and a mid-play stall (the player
+        // waiting, the clock frozen, no error) is the same
+        // silence. The watchdog speaks for both, with the iOS
+        // 1.30 pair of numbers: no readyToPlay within 6 s of the
+        // rung being handed over, or a playing clock that has
+        // not moved for 10 s while the player waits, is a dead
+        // rung — reported through the same once-only fire as an
+        // item failure, so the surface advances and the health
+        // memory records it. The owner's own pause stands the
+        // stall half down (timeControlStatus .paused keeps the
+        // progress clock fresh).
+        private static let loadTimeout: TimeInterval = 6
+        private static let stallTimeout: TimeInterval = 10
+        private var watchdog: Task<Void, Never>?
+        private weak var player: AVPlayer?
+        private var ready = false
+        private var observedAt = Date()
+        private var lastTime: Double = -1
+        private var lastProgressAt = Date()
+
         init(onFail: @escaping () -> Void, onReady: @escaping () -> Void) {
             self.onFail = onFail
             self.onReady = onReady
         }
 
-        func observe(_ item: AVPlayerItem) {
+        func observe(_ item: AVPlayerItem, player: AVPlayer) {
+            self.player = player
+            observedAt = Date()
+            lastProgressAt = Date()
+            lastTime = -1
             statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 // Read the status VALUE here and hop: the KVO handler
                 // is a non-isolated context, the coordinator's state
@@ -918,11 +1012,55 @@ private struct PlayerController: UIViewControllerRepresentable {
                     self?.fireOnce()
                 }
             }
+            watchdog = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    // Re-check AFTER the sleep (fix round,
+                    // review B-MINOR-1): a task cancelled while
+                    // sleeping must not tick once more on a
+                    // surface that is already tearing down.
+                    guard let self, !Task.isCancelled, !self.fired else { return }
+                    self.watchdogTick()
+                }
+            }
+        }
+
+        private func watchdogTick() {
+            guard let player else { return }
+            let now = Date()
+            if !ready {
+                if now.timeIntervalSince(observedAt) > Self.loadTimeout {
+                    DiagLog.write("player", "watchdog: no first frame in "
+                        + "\(Int(Self.loadTimeout)) s — advancing")
+                    fireOnce()
+                }
+                return
+            }
+            let t = player.currentTime().seconds
+            if t.isFinite, t > lastTime + 0.05 {
+                lastTime = t
+                lastProgressAt = now
+            }
+            switch player.timeControlStatus {
+            case .waitingToPlayAtSpecifiedRate:
+                if now.timeIntervalSince(lastProgressAt) > Self.stallTimeout {
+                    DiagLog.write("player", "watchdog: playback stalled "
+                        + "\(Int(Self.stallTimeout)) s — advancing")
+                    fireOnce()
+                }
+            case .paused, .playing:
+                // The owner's own pause is not a stall, and a
+                // playing player is making progress by definition.
+                lastProgressAt = now
+            @unknown default:
+                break
+            }
         }
 
         private func handleStatus(_ status: AVPlayerItem.Status) {
             switch status {
             case .readyToPlay:
+                ready = true
                 onReady()
             case .failed:
                 fireOnce()
@@ -934,10 +1072,14 @@ private struct PlayerController: UIViewControllerRepresentable {
         private func fireOnce() {
             guard !fired else { return }
             fired = true
+            watchdog?.cancel()
+            watchdog = nil
             onFail()
         }
 
         func invalidate() {
+            watchdog?.cancel()
+            watchdog = nil
             statusToken?.invalidate()
             statusToken = nil
             if let failToken {
