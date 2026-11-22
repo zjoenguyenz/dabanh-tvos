@@ -52,6 +52,16 @@ enum TVKickoffFormat {
         return f
     }()
 
+    /// Full date (1.7.4, design Match Centre / board
+    /// metadata + design card footer): "dd/MM/yyyy" in the
+    /// device timezone, like every other stamp here.
+    static let fullDate: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "dd/MM/yyyy"
+        return f
+    }()
+
     /// 1.7.1 MU header date formatter (table H2): the design's
     /// right block is clock + date — "EEE, dd MMM" in the
     /// device locale and timezone, uppercased at the call site.
@@ -2289,9 +2299,589 @@ struct TVMUWallpaperLayer: View {
             }
             Color.black.opacity(dim)
         }
+        // 1.7.4 (S4): the layer is BOUNDED — the same frame
+        // TVWallpaperView carries. Before, the ZStack sized
+        // itself to the decoded photo, so any surface laying
+        // out against it (the theme picker's foreground
+        // column above all) negotiated a wallpaper-dependent
+        // size and visibly shifted when the wallpaper changed
+        // (picker-shift, convicted in the 1.7.2 full-set
+        // audit). Callers that ignore the safe area still
+        // get the full bleed; the layer itself now always
+        // reports the same, parent-given size.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .task(id: url) {
             image = await TVImageCache.loadDownsampled(url, maxPixel: 1920)
+        }
+    }
+}
+
+// MARK: - United design theme (1.7.4 — the designer's united set)
+//
+// Everything below renders ONLY under the "Manchester United"
+// design theme (theme.id == .unitedDesign). The MU Wally family
+// above is untouched. The design's rules that differ from the
+// shipped MU look, per the designer's drawings + answers:
+// - the app header is crest + "ĐÁ BANH TV" + the letterspaced
+//   MANCHESTER UNITED tagline (the mock's centre sample-data
+//   line and its "Cài đặt" link are mock furniture, not app UI);
+// - tabs are plain text: selected = gold outline + red
+//   underline, NO red dot;
+// - rail counts are plain numbers in an outlined chip;
+// - a missing crest falls back to the team's INITIALS on a
+//   tile — never a sport glyph (answer Q1);
+// - live cards carry ONE red line "TRỰC TIẾP · 67'"; upcoming
+//   cards centre "VS" and put the kickoff clock in the footer.
+
+/// The design header (Home, Match Centre, source board):
+/// crest + wordmark left, the app's clock + date right (the
+/// mock's right slot is its settings link — the app's real
+/// settings door is the Giao diện pill, unchanged), hairline
+/// under. One construction for every design surface.
+struct TVDesignHeader: View {
+    @Environment(\.tvTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 14) {
+                TVCrestImage(url: Crests.url(forTeam: "Manchester United"), size: 64)
+                VStack(alignment: .leading, spacing: 3) {
+                    (Text("ĐÁ BANH").foregroundStyle(.white)
+                        + Text("TV").foregroundStyle(theme.accent))
+                        .font(.system(size: 34, weight: .bold))
+                    Text("MANCHESTER UNITED")
+                        .font(.system(size: 12, weight: .semibold))
+                        .tracking(3)
+                        .foregroundStyle(theme.accent.opacity(0.8))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(TVKickoffFormat.time.string(from: Date()))
+                        .font(.system(size: 30))
+                        .foregroundStyle(theme.dashTx)
+                    Text(TVKickoffFormat.muHeaderDateFormatter.string(from: Date()).uppercased())
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.leagueTx)
+                }
+            }
+            Rectangle()
+                .fill(Color.white.opacity(0.14))
+                .frame(height: 1)
+                .padding(.top, 10)
+        }
+    }
+}
+
+/// A team's initials, the design's crest fallback (Q1): the
+/// first letters of the first up-to-three words, uppercased,
+/// diacritics kept ("Phù Đổng Ninh Bình" → "PĐN", "Saigon
+/// Heat" → "SH", "Manchester United" → "MU" — the mock's own
+/// renderings). A one-word name gives its first two letters.
+func tvTeamInitials(_ name: String) -> String {
+    let words = name.split(separator: " ").map(String.init)
+    guard let first = words.first else { return "?" }
+    if words.count == 1 {
+        return String(first.prefix(2)).uppercased()
+    }
+    return words.prefix(3).map { String($0.prefix(1)) }.joined().uppercased()
+}
+
+/// The initials tile: dark tile, gold-tinted border, gold
+/// initials. One construction at the design's three sizes
+/// (card 80 / board 92 / Match Centre 168).
+struct TVTeamInitialsTile: View {
+    @Environment(\.tvTheme) private var theme
+    let name: String
+    let size: CGFloat
+    let fontSize: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.17)
+                .fill(theme.tileBG)
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.17)
+                        .strokeBorder(theme.accent.opacity(0.45),
+                                      lineWidth: 1.5))
+            Text(tvTeamInitials(name))
+                .font(.system(size: fontSize, weight: .bold))
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(.horizontal, 6)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// A crest slot under the design theme: the real crest when
+/// one resolved, the initials tile when it did not — the
+/// slot's size never changes (FL-360).
+struct TVDesignCrestSlot: View {
+    let url: URL?
+    let teamName: String
+    let size: CGFloat
+    let fontSize: CGFloat
+
+    var body: some View {
+        if let url {
+            TVCrestImage(url: url, size: size)
+        } else {
+            TVTeamInitialsTile(name: teamName, size: size, fontSize: fontSize)
+        }
+    }
+}
+
+/// The design text tab (fresh Home drawing): plain 25 pt
+/// text, no capsule, NO red dot. Selected = white semibold +
+/// gold outline + red underline inside the face's bounds;
+/// focused = maroon fill + gold outline. Fixed height 58 and
+/// a bold-width reservation, exactly the TVMUTabFace
+/// discipline (FL-360 / FL-001).
+struct TVDesignTabFace: View {
+    let title: String
+    let selected: Bool
+    let focused: Bool
+    let theme: TVThemeTokens
+
+    var body: some View {
+        ZStack {
+            Text(title)
+                .font(.system(size: 25, weight: .bold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .opacity(0)
+            Text(title)
+                .font(.system(size: 25, weight: selected ? .semibold : .medium))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .foregroundStyle(selected ? .white : theme.leagueTx)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 58)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(focused ? theme.tileFocusedBG : .clear)
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(focused ? theme.focusRing
+                                          : (selected ? theme.focusRing : .clear),
+                                  lineWidth: focused ? 2.5 : 1.5)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if selected {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(theme.unitedRed)
+                    .frame(width: 56, height: 4)
+                    .padding(.bottom, 5)
+            }
+        }
+    }
+}
+
+/// The design rail header (fresh Home drawing): title 40
+/// bold + the count as a PLAIN number in a thin outlined
+/// chip (no zero-padding, no gold). Fixed height 50, the
+/// family slot.
+struct TVDesignRailHeader: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Text(title)
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Text("\(count)")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.white.opacity(0.25),
+                                      lineWidth: 1.5))
+            Spacer(minLength: 0)
+        }
+        .frame(height: 50)
+    }
+}
+
+/// One fixture in the design layout: the MU card family's
+/// fixed slots (header 40 / centre 92 / names 56 / footer
+/// 24 + 8, height 272 — FL-360) with the design drawing's
+/// contents: one-line red live mark, "VS" centred for every
+/// scoreless state, initials tiles for missing crests, and
+/// the footer carrying the channel group + the match DATE
+/// (live/finished) or the kickoff CLOCK (upcoming).
+struct TVDesignMatchCard: View {
+    @EnvironmentObject private var store: PlaylistStore
+    @Environment(\.tvTheme) private var theme
+    @Environment(\.tvMUCardWidth) private var cardWidth
+    let entry: TVFixtureEntry
+    let focused: Bool
+
+    /// C1 gold family, the TVLiveBoardView rule.
+    private var isGold: Bool {
+        entry.competition == .championsLeague || entry.competition == .womensChampionsLeague
+    }
+
+    var body: some View {
+        let _ = store.crestsRevision
+        VStack(alignment: .leading, spacing: 0) {
+            headerRow
+            centreRow
+            namesRow
+            Spacer(minLength: 0)
+            Rectangle()
+                .fill(theme.tileBorder)
+                .frame(height: 1)
+            footerRow
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .background(tvMUCardBackground(focused: focused, theme: theme))
+    }
+
+    // Header, FIXED 40: league caps left (gold family for
+    // C1), the state line right — ONE red line for live, the
+    // design's form; upcoming and replay draw nothing here.
+    private var headerRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(entry.competitionLabel)
+                .font(.system(size: 15, weight: .bold))
+                .tracking(1.5)
+                .foregroundStyle(isGold ? theme.c1Label : theme.leagueTx)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            headerState
+        }
+        .frame(height: 40, alignment: .top)
+    }
+
+    @ViewBuilder
+    private var headerState: some View {
+        if entry.isLive {
+            Text(liveLine)
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(theme.minuteRed)
+                .lineLimit(1)
+        } else if entry.state?.status == .ft {
+            Text("FT")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+        } else if entry.state?.status == .postponed || entry.state?.status == .cancelled {
+            Text("HOÃN")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(.gray)
+                .lineLimit(1)
+        }
+    }
+
+    /// "TRỰC TIẾP · 67'" — the minute is the matched state's
+    /// own clock when one is bound; a live fixture without a
+    /// state shows the word alone (no invented minute, Q1).
+    private var liveLine: String {
+        if let minute = entry.state?.minuteText {
+            return "TRỰC TIẾP · " + minute
+        }
+        return "TRỰC TIẾP"
+    }
+
+    // Centre, FIXED 92: crest-or-initials 92 | centre slot
+    // FIXED 150 | crest-or-initials 92. A non-fixture entry
+    // centres its channel logo in the same slot instead.
+    private var centreRow: some View {
+        Group {
+            if let teams = entry.teams {
+                HStack(alignment: .center, spacing: 0) {
+                    TVDesignCrestSlot(url: entry.displayCrests?.0 ?? nil,
+                                      teamName: teams.0, size: 80, fontSize: 28)
+                        .frame(width: 92)
+                    Spacer(minLength: 0)
+                    centreSlot
+                    Spacer(minLength: 0)
+                    TVDesignCrestSlot(url: entry.displayCrests?.1 ?? nil,
+                                      teamName: teams.1, size: 80, fontSize: 28)
+                        .frame(width: 92)
+                }
+            } else {
+                TVChannelLogo(channel: entry.channel, height: 84)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 92)
+    }
+
+    @ViewBuilder
+    private var centreSlot: some View {
+        if let state = entry.state, let h = state.scoreHome, let a = state.scoreAway {
+            Text("\(h) : \(a)")
+                .font(.system(size: 44, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 150)
+        } else {
+            // The design's upcoming face: "VS" — the kickoff
+            // clock lives in the footer, not the centre.
+            Text("VS")
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(width: 150)
+        }
+    }
+
+    // Names, FIXED 56: each name centred under its crest, or
+    // the cleaned title centred for a non-fixture.
+    private var namesRow: some View {
+        Group {
+            if let teams = entry.teams {
+                HStack(alignment: .center, spacing: 0) {
+                    Text(teams.0)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                    Color.clear.frame(width: 150, height: 1)
+                    Text(teams.1)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                Text(entry.cleanTitle)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 56)
+    }
+
+    // Footer, FIXED 24 (+8 top padding): the representative
+    // channel's group left; right = the kickoff CLOCK for a
+    // fixture still to come, the match DATE otherwise (the
+    // drawing's two rail forms).
+    private var footerRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(entry.channel.group.isEmpty ? entry.cleanTitle : entry.channel.group)
+                .font(.system(size: 19))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let kickoff = entry.channel.kickoff {
+                Text(kickoff > Date()
+                     ? TVKickoffFormat.time.string(from: kickoff)
+                     : TVKickoffFormat.fullDate.string(from: kickoff))
+                    .font(.system(size: 19))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+            }
+        }
+        .frame(height: 24)
+        .padding(.top, 8)
+    }
+}
+
+/// One horizontal rail of design fixture cards: the MU
+/// fixture rail's shell (own @FocusState, keys reported
+/// upward, slot 280 FIXED) with the design header + cards.
+struct TVDesignFixtureRail: View {
+    let title: String
+    let entries: [TVFixtureEntry]
+    let keyFor: (TVFixtureEntry) -> String
+    let onSelect: (TVFixtureEntry) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVDesignRailHeader(title: title, count: entries.count)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(entries) { entry in
+                        Button {
+                            onSelect(entry)
+                        } label: {
+                            TVDesignMatchCard(entry: entry,
+                                              focused: focus == keyFor(entry))
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: keyFor(entry))
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+// MARK: - Design Nuvio / EN rails (1.7.4, Round 1 review B-1)
+
+/// One horizontal rail of DESIGN Nuvio EVENT cards: the MU
+/// rail's shell verbatim (own @FocusState, keys reported
+/// upward, slot 280 FIXED) with the DESIGN header. No design
+/// drawing exists for Nuvio cards, so the card stays the
+/// family TVMUNuvioEventCard — it repaints from the design
+/// tokens through the environment; only the header, the one
+/// element every design rail shares, follows the design
+/// theme. (Round 1 review B-1: these rails previously fell
+/// through the family isMU branch and rendered the MU
+/// Wally header under the design theme.)
+struct TVDesignNuvioEventRail: View {
+    let title: String
+    let items: [NuvioItem]
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVDesignRailHeader(title: title, count: items.count)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            TVMUNuvioEventCard(item: item,
+                                               focused: focus == "nv:" + item.id)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// One horizontal rail of DESIGN Nuvio CHANNEL cards:
+/// TVMUNuvioChannelRail's signature and shell (subtitle and
+/// detailPrefix included — data copy, not header styling)
+/// with the design header; the cards stay the family
+/// TVMUNuvioChannelCard (B-1, as above).
+struct TVDesignNuvioChannelRail: View {
+    let title: String
+    var subtitle: String? = nil
+    let items: [NuvioItem]
+    var detailPrefix: String? = nil
+    let onSelect: (NuvioItem) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVDesignRailHeader(title: title, count: items.count)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 22))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(items) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            if let detailPrefix {
+                                TVMUNuvioChannelCard(item: item,
+                                                     focused: focus == "nv:" + item.id,
+                                                     detailPrefix: detailPrefix)
+                            } else {
+                                TVMUNuvioChannelCard(item: item,
+                                                     focused: focus == "nv:" + item.id)
+                            }
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "nv:" + item.id)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
+        }
+    }
+}
+
+/// The old mirror EN block's rail in the DESIGN layout:
+/// TVMUENChannelRail's title and subtitle verbatim (data
+/// copy), the design header, the family TVMUENChannelCard,
+/// the same focus pattern (B-1, as above).
+struct TVDesignENChannelRail: View {
+    let channels: [Channel]
+    let onSelect: (Channel) -> Void
+    let onFocusKey: (String) -> Void
+    @FocusState private var focus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TVDesignRailHeader(title: "🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH",
+                               count: channels.count)
+            Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.6))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 22) {
+                    ForEach(channels) { ch in
+                        Button {
+                            onSelect(ch)
+                        } label: {
+                            TVMUENChannelCard(channel: ch,
+                                              focused: focus == "en:" + ch.url)
+                        }
+                        .tvCardButton()
+                        .focused($focus, equals: "en:" + ch.url)
+                        .frame(height: 280, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0)
+            }
+        }
+        .onChange(of: focus) { _, key in
+            guard let key else { return }
+            FocusSignpost.begin()
+            onFocusKey(key)
+            Task { @MainActor in FocusSignpost.end() }
         }
     }
 }

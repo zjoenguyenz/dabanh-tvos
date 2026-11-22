@@ -5,11 +5,28 @@ import SwiftUI
 /// app's established look; the Manchester United theme is an
 /// added skin only — no behaviour changes with the theme.
 /// See work-170/SCOPE-170.md and work-170/IMPL-SPEC.md.
+///
+/// 1.7.4 (owner ruling 2026-11-22 02:01 CST): the MU side
+/// splits in TWO. The shipped 1.7.2 MU look is preserved
+/// verbatim as its own theme, "MU Wally" — and it keeps the
+/// stored raw value "manchesterUnited", so the owner's
+/// current selection migrates to the MU Wally arm by
+/// construction (the stored string parses straight to it;
+/// nothing is rewritten). The design-exact theme from the
+/// designer's united set is the third theme, "Manchester
+/// United", under its own stable id. `isMU` is the FAMILY
+/// predicate (either MU theme): wallpaper plumbing, the
+/// background rows, hero suppression and the family faces
+/// key on it; a face that belongs to ONE arm compares the
+/// id directly.
 enum TVThemeID: String, CaseIterable {
     case classic
-    case manchesterUnited
+    case muWally = "manchesterUnited"
+    case unitedDesign = "manchesterUnitedDesign"
 
-    var isMU: Bool { self == .manchesterUnited }
+    /// The MU family: MU Wally or the design theme.
+    var isMU: Bool { self == .muWally || self == .unitedDesign }
+    var isDesign: Bool { self == .unitedDesign }
 }
 
 /// A `#RRGGBB` colour, so the MU tokens below read exactly as
@@ -84,11 +101,14 @@ struct TVThemeTokens: Sendable {
         unitedRed: TVPalette.liveRed,
         cream: TVPalette.c1Head)
 
-    /// The Manchester United theme (approved "united-tv"
-    /// design): near-black boards, charcoal tiles, maroon
-    /// focus fill, gold ring/accent, United red, cream text.
-    static let manchesterUnited = TVThemeTokens(
-        id: .manchesterUnited,
+    /// "MU Wally" (1.7.4): the shipped 1.7.2 MU token set,
+    /// preserved VERBATIM — near-black boards, charcoal
+    /// tiles, maroon focus fill, gold ring/accent, United
+    /// red, cream text. The values below are the 1.7.0–1.7.3
+    /// `manchesterUnited` set unchanged; only the name and
+    /// the id moved.
+    static let muWally = TVThemeTokens(
+        id: .muWally,
         bgTop: tvHex(0x0B0E13),
         bgMid: tvHex(0x0B0E13),
         bgBottom: .black,
@@ -121,10 +141,52 @@ struct TVThemeTokens: Sendable {
         unitedRed: tvHex(0xDA291C),
         cream: tvHex(0xF2E6C8))
 
+    /// "Manchester United" (1.7.4): the design-exact theme —
+    /// the designer's united spec sheet values (Ink #090B10 ·
+    /// Navy #0A1120 · Red #DA291C · Gold #D7B777 · Text
+    /// #F7F5EF · Muted #A5A8AF). The maroon focus fill is the
+    /// drawn focused face's colour, shared with the family;
+    /// the amber and the card colours have no design-sheet
+    /// value and keep the family's.
+    static let unitedDesign = TVThemeTokens(
+        id: .unitedDesign,
+        bgTop: tvHex(0x090B10),
+        bgMid: tvHex(0x090B10),
+        bgBottom: .black,
+        boardBG: tvHex(0x090B10),
+        tileBG: tvHex(0x0A1120),
+        tileBorder: .white.opacity(0.10),
+        tileFocusedBG: tvHex(0x4A1A1A),
+        focusRing: tvHex(0xD7B777),
+        accent: tvHex(0xD7B777),
+        leagueTx: tvHex(0xA5A8AF),
+        minuteRed: tvHex(0xDA291C),
+        htAmber: TVPalette.htAmber,
+        liveDot: tvHex(0xDA291C),
+        teamTx: tvHex(0xF7F5EF),
+        dashTx: tvHex(0xA5A8AF),
+        eventsLine: .white.opacity(0.12),
+        evTx: .white.opacity(0.75),
+        evMin: tvHex(0xD7B777),
+        cardY: TVPalette.cardY,
+        cardR: TVPalette.cardR,
+        c1TileBG: tvHex(0x0A1120),
+        c1Border: .white.opacity(0.10),
+        c1Gold: tvHex(0xD7B777),
+        c1Head: tvHex(0xF7F5EF),
+        c1Label: tvHex(0xD7B777),
+        selectedFill: .white.opacity(0.10),
+        liveRed: tvHex(0xDA291C),
+        amber: tvHex(0xFFC759),
+        heroMeta: tvHex(0xF7F5EF),
+        unitedRed: tvHex(0xDA291C),
+        cream: tvHex(0xF7F5EF))
+
     static func tokens(for id: TVThemeID) -> TVThemeTokens {
         switch id {
         case .classic: return .classic
-        case .manchesterUnited: return .manchesterUnited
+        case .muWally: return .muWally
+        case .unitedDesign: return .unitedDesign
         }
     }
 }
@@ -201,12 +263,25 @@ final class TVThemeStore: ObservableObject {
 
 /// The full-screen theme picker behind the header's "Giao
 /// diện" pill, rebuilt in 1.7.1 as the design's Giao diện
-/// pane (table S1/S2/S3): header row, title, the two theme
+/// pane (table S1/S2/S3): header row, title, the theme
 /// cards SIDE BY SIDE with preview blocks, then the MU
 /// background rows. Chrome is painted in the CURRENT theme's
 /// tokens (the 1.7.0 rule); selecting a card applies it at
 /// once and dismisses. The background rows are always shown —
-/// they steer the MU theme, and are labelled as such.
+/// they steer the MU themes, and are labelled as such.
+/// 1.7.4: THREE cards in one row (designer answer Q6) —
+/// Classic / MU Wally / Manchester United. Focus and
+/// selection are separate marks: the focused card carries
+/// the SettingsSpec focus outline (gold, 3 pt, outset 6 pt —
+/// pickerCardBackground below), the SELECTED card carries
+/// only the checkmark on its preview.
+/// 1.7.4 (S4): the foreground column is ANCHORED to the full
+/// frame — before, it sized itself against the background
+/// layers (whose wallpaper layer was itself unbounded), so
+/// the whole pane negotiated a wallpaper-dependent position
+/// and the cards visibly shifted when the wallpaper changed
+/// (the owner's picker-shift report, convicted in the 1.7.2
+/// full-set audit).
 struct TVThemePickerView: View {
     @EnvironmentObject private var themeStore: TVThemeStore
     @Environment(\.tvTheme) private var theme
@@ -250,10 +325,14 @@ struct TVThemePickerView: View {
                 HStack(spacing: 28) {
                     optionCard(
                         id: .classic,
-                        title: "Mặc định",
+                        title: "Classic",
                         subtitle: "Giao diện gốc của Đá Banh TV")
                     optionCard(
-                        id: .manchesterUnited,
+                        id: .muWally,
+                        title: "MU Wally",
+                        subtitle: "Giao diện hiện có · Giữ nguyên")
+                    optionCard(
+                        id: .unitedDesign,
                         title: "Manchester United",
                         subtitle: "Đỏ United · Đen · Vàng kim")
                 }
@@ -261,6 +340,12 @@ struct TVThemePickerView: View {
             }
             .padding(.horizontal, 100)
             .padding(.vertical, 44)
+            // S4 anchor (1.7.4): the column fills the frame
+            // and pins to its top-leading corner, so its
+            // layout never negotiates against the background
+            // layers' size (see the type note above).
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: .topLeading)
         }
         .defaultFocus($focusedID, Self.cardID(themeStore.themeID))
         .onExitCommand { dismiss() }
@@ -303,15 +388,48 @@ struct TVThemePickerView: View {
                 Spacer(minLength: 0)
             }
             .padding(20)
-            .frame(width: 640, height: 300, alignment: .leading)
-            .background(tvCardBackground(focused: focused, theme: theme))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22)
-                    .strokeBorder(theme.focusRing,
-                                  lineWidth: selected ? 3 : 0))
+            // 1.7.4 (Q6): three equal cards in one row —
+            // (1920 − 2×100 pane padding − 2×28 gaps) / 3 =
+            // 554. The face's outline is the ONLY focus mark;
+            // selection is the preview checkmark alone — the
+            // 1.7.1–1.7.3 build stroked the SELECTED card with
+            // the same ring, so focus and selection were
+            // indistinguishable.
+            .frame(width: 554, height: 300, alignment: .leading)
+            .background(pickerCardBackground(focused: focused))
         }
         .tvCardButton()
         .focused($focusedID, equals: Self.cardID(id))
+    }
+
+    /// The picker cards' focus face (1.7.4, gate F-2): the
+    /// SettingsSpec sheet draws the theme cards' focus as a
+    /// gold OUTLINE — 3 pt in the CURRENT theme's focus
+    /// colour, OUTSET 6 pt from the card's edge (radius
+    /// 22 + 6 = 28 keeps the corners concentric) — stated to
+    /// be independent of the selected check/background. The
+    /// shared tvCardBackground ring is an INSET stroke and
+    /// remains the face of the in-app rail cards; the
+    /// picker's drawn spec is its own. The fill inside is
+    /// the family card fill (focused tile over board), so
+    /// the card itself reads exactly like the family face in
+    /// both states.
+    private func pickerCardBackground(focused: Bool) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 22)
+                .fill(LinearGradient(
+                    colors: [focused ? theme.tileFocusedBG : theme.tileBG,
+                             theme.boardBG],
+                    startPoint: .topLeading, endPoint: .bottomTrailing))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .strokeBorder(theme.tileBorder, lineWidth: 1.5))
+            if focused {
+                RoundedRectangle(cornerRadius: 28)
+                    .stroke(theme.focusRing, lineWidth: 3)
+                    .padding(-6)
+            }
+        }
     }
 
     /// The card's preview block (height 150): the selected
@@ -338,7 +456,7 @@ struct TVThemePickerView: View {
             if let url = Wallpapers.images().first {
                 TVMUWallpaperLayer(url: url, dim: 0)
             } else {
-                muSwatchComposition
+                muSwatchComposition(for: id)
             }
         } else {
             classicSkeleton
@@ -372,10 +490,11 @@ struct TVThemePickerView: View {
     }
 
     /// MU preview when the wallpaper list is empty: a maroon
-    /// panel with the gold / red / cream swatches, in the MU
-    /// theme's own tokens.
-    private var muSwatchComposition: some View {
-        let mu = TVThemeTokens.manchesterUnited
+    /// panel with the gold / red / cream swatches, in the
+    /// card's OWN theme tokens (1.7.4: each MU card previews
+    /// its own set).
+    private func muSwatchComposition(for id: TVThemeID) -> some View {
+        let mu = TVThemeTokens.tokens(for: id)
         return ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(mu.tileFocusedBG)
@@ -435,7 +554,7 @@ struct TVThemePickerView: View {
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
-            .frame(maxWidth: 1308, alignment: .leading)
+            .frame(maxWidth: 1718, alignment: .leading)
             .background(TVPillFace(focused: focusedID == Self.bgRowID,
                                    selected: false,
                                    theme: theme))
@@ -477,7 +596,7 @@ struct TVThemePickerView: View {
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
-            .frame(maxWidth: 1308, alignment: .leading)
+            .frame(maxWidth: 1718, alignment: .leading)
             .background(TVPillFace(focused: focusedID == Self.autoRowID,
                                    selected: false,
                                    theme: theme))

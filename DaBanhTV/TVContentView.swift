@@ -816,7 +816,11 @@ struct TVContentView: View {
     /// old 56-pt two-line brand block is gone.
     @ViewBuilder
     private var header: some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4: the design theme's own header (crest +
+            // ĐÁ BANH TV wordmark + MANCHESTER UNITED tagline).
+            TVDesignHeader()
+        } else if theme.id.isMU {
             muHeader
         } else {
             HStack(alignment: .center, spacing: 18) {
@@ -1050,7 +1054,14 @@ struct TVContentView: View {
         return Button {
             store.selectedLeague = value
         } label: {
-            if theme.id.isMU {
+            if theme.id.isDesign {
+                // 1.7.4: the design theme's text tab — the
+                // fresh drawing's face (gold outline + red
+                // underline on selection, NO red dot).
+                TVDesignTabFace(title: title, selected: selected,
+                                focused: focusedKey == "pill:\(value)",
+                                theme: theme)
+            } else if theme.id.isMU {
                 // 1.7.1 (table H3): under MU the tab is the
                 // design's TEXT tab — TVMUTabFace carries the
                 // whole face (hidden-bold width reservation
@@ -1211,12 +1222,24 @@ struct TVContentView: View {
                             // heroLookup/prefetch behaviour is
                             // identical.
                             if !(featuredEntries + live).isEmpty {
-                                TVMUFixtureRail(title: "🔴  ĐANG ĐÁ",
-                                                entries: featuredEntries + live,
-                                                note: nil,
-                                                keyFor: { featuredIDs.contains($0.id) ? "feat:" + $0.id : "rail:" + $0.id },
-                                                onSelect: play,
-                                                onFocusKey: heroFocus)
+                                if theme.id.isDesign {
+                                    // 1.7.4: the design rail —
+                                    // same entries, keys and
+                                    // order; the design header
+                                    // carries no date note.
+                                    TVDesignFixtureRail(title: "🔴  ĐANG ĐÁ",
+                                                        entries: featuredEntries + live,
+                                                        keyFor: { featuredIDs.contains($0.id) ? "feat:" + $0.id : "rail:" + $0.id },
+                                                        onSelect: play,
+                                                        onFocusKey: heroFocus)
+                                } else {
+                                    TVMUFixtureRail(title: "🔴  ĐANG ĐÁ",
+                                                    entries: featuredEntries + live,
+                                                    note: nil,
+                                                    keyFor: { featuredIDs.contains($0.id) ? "feat:" + $0.id : "rail:" + $0.id },
+                                                    onSelect: play,
+                                                    onFocusKey: heroFocus)
+                                }
                             }
                         } else {
                             if !featuredEntries.isEmpty {
@@ -1476,7 +1499,15 @@ struct TVContentView: View {
 
     @ViewBuilder
     private func nuvioEventRail(_ title: String, _ items: [NuvioItem]) -> some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4 (Round 1 review B-1): the design rail
+            // shell — the design header over the family cards.
+            TVDesignNuvioEventRail(title: title, items: items,
+                                   onSelect: { item in
+                                       playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                   },
+                                   onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             // 1.7.1 (table H8): the MU rail shell for addon events.
             TVMUNuvioEventRail(title: title, items: items,
                                onSelect: { item in
@@ -1494,7 +1525,16 @@ struct TVContentView: View {
 
     @ViewBuilder
     private func nuvioChannelRail(_ items: [NuvioItem]) -> some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4 (Round 1 review B-1): the design rail shell.
+            TVDesignNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
+                                     subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
+                                     items: items,
+                                     onSelect: { item in
+                                         playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                     },
+                                     onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             // 1.7.1 (table H8): the MU rail shell for addon channels.
             TVMUNuvioChannelRail(title: "📺  NUVIO · KÊNH 24/7",
                                  subtitle: "Kênh tiếng Anh từ addon Nuvio — phát liên tục.",
@@ -1521,7 +1561,18 @@ struct TVContentView: View {
     @ViewBuilder
     private func leagueChannelRail(_ items: [NuvioItem], league: League) -> some View {
         let copy = leagueChannelCopy(league)
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4 (Round 1 review B-1): the design rail
+            // shell, league copy kept.
+            TVDesignNuvioChannelRail(title: copy.railTitle,
+                                     subtitle: copy.railSubtitle,
+                                     items: items,
+                                     detailPrefix: copy.cardPrefix,
+                                     onSelect: { item in
+                                         playRequest = PlayRequest(resolution: nuvio.resolution(for: item))
+                                     },
+                                     onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             // 1.7.1 (table H8): the MU rail shell, league copy kept.
             TVMUNuvioChannelRail(title: copy.railTitle,
                                  subtitle: copy.railSubtitle,
@@ -1547,7 +1598,14 @@ struct TVContentView: View {
     /// below the addon sections, as the fallback pool.
     @ViewBuilder
     private var oldENBlock: some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4 (Round 1 review B-1): the design rail shell.
+            TVDesignENChannelRail(channels: enChannels,
+                                  onSelect: { ch in
+                                      playRequest = PlayRequest(resolution: store.resolution(for: ch))
+                                  },
+                                  onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             // 1.7.1 (table H8): the MU rail shell for the old block.
             TVMUENChannelRail(channels: enChannels,
                               onSelect: { ch in
@@ -1918,7 +1976,13 @@ struct TVContentView: View {
     @ViewBuilder
     private func railSection(_ title: String, _ items: [TVFixtureEntry],
                              muNote: String? = nil) -> some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            // 1.7.4: design rail (muNote is a Wally-header
+            // datum; the design header carries no note).
+            TVDesignFixtureRail(title: title, entries: items,
+                                keyFor: { "rail:" + $0.id },
+                                onSelect: play, onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             TVMUFixtureRail(title: title, entries: items, note: muNote,
                             keyFor: { "rail:" + $0.id },
                             onSelect: play, onFocusKey: heroFocus)
@@ -1937,7 +2001,11 @@ struct TVContentView: View {
     @ViewBuilder
     private func railSection(_ title: String, _ items: [TVFixtureEntry],
                              sectionLabel: String) -> some View {
-        if theme.id.isMU {
+        if theme.id.isDesign {
+            TVDesignFixtureRail(title: sectionLabel + " · " + title, entries: items,
+                                keyFor: { "rail:" + $0.id },
+                                onSelect: play, onFocusKey: heroFocus)
+        } else if theme.id.isMU {
             TVMUFixtureRail(title: sectionLabel + " · " + title, entries: items,
                             note: nil,
                             keyFor: { "rail:" + $0.id },

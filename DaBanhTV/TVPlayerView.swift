@@ -71,6 +71,8 @@ struct TVPlayerView: View {
                           onSwitchButton: { openSwitch() },
                           onPlayingURL: { playingURL = $0 },
                           onExhausted: { handleExhaustion() },
+                          onRetry: { session += 1 },
+                          onClose: { dismiss() },
                           startURL: startURL,
                           surfaceLocked: switchOpen,
                           launchedViaSwitch: session > 0)
@@ -82,7 +84,11 @@ struct TVPlayerView: View {
                 // behind the panel.
                 .disabled(switchOpen)
             if switchOpen, let switchContext {
-                switchOverlay(switchContext)
+                if theme.id.isDesign {
+                    designSwitchPanel(switchContext)
+                } else {
+                    switchOverlay(switchContext)
+                }
             }
         }
         .onExitCommand {
@@ -236,6 +242,153 @@ struct TVPlayerView: View {
         }
     }
 
+    // MARK: Design switch panel (1.7.4, Q7 — Player-sources)
+
+    /// The design theme's source-switch panel: a right-side
+    /// panel in the board's own arrangement (the drawing's
+    /// Player-sources) — gold-edged, the board's rows, a
+    /// check on the playing row, an ✕ that closes it (Menu
+    /// closes it too, via the shell's exit command, exactly
+    /// as the centred overlay). Same focus ids, same picks,
+    /// same playing-row assertion as switchOverlay.
+    private func designSwitchPanel(_ ctx: TVSwitchContext) -> some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Chọn nguồn phát")
+                                .font(.system(size: 34, weight: .bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            Text(ctx.title)
+                                .font(.system(size: 20))
+                                .foregroundStyle(theme.leagueTx)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Button {
+                            switchOpen = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 52, height: 52)
+                                .background(
+                                    Circle()
+                                        .fill(theme.tileBG)
+                                        .overlay(
+                                            Circle()
+                                                .strokeBorder(
+                                                    switchFocus == "sw:close"
+                                                        ? theme.focusRing
+                                                        : theme.tileBorder,
+                                                    lineWidth: switchFocus == "sw:close" ? 3 : 1.5)))
+                        }
+                        .tvCardButton()
+                        .focused($switchFocus, equals: "sw:close")
+                    }
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 26) {
+                            designSwitchVNSection(ctx)
+                            if !ctx.enItems.isEmpty {
+                                designSwitchENSection(ctx)
+                            }
+                        }
+                        .padding(.bottom, 10)
+                    }
+                }
+                .padding(.horizontal, 36)
+                .padding(.vertical, 32)
+                .frame(width: 880)
+                .frame(maxHeight: .infinity)
+                .background(theme.boardBG)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(theme.focusRing)
+                        .frame(width: 3)
+                }
+                .onAppear { switchFocus = playingRowID }
+            }
+        }
+    }
+
+    private func designSwitchVNSection(_ ctx: TVSwitchContext) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            designGroupHeader(title: "Tiếng Việt",
+                              total: ctx.vnSources.count,
+                              selectable: ctx.vnSources.filter {
+                                  SourceHealth.status(for: $0.url) != .dead
+                              }.count)
+            ForEach(Array(ctx.vnSources.enumerated()), id: \.offset) { index, ch in
+                Button {
+                    pickVN(ch, in: ctx)
+                } label: {
+                    TVDesignSourceRow(
+                        title: MatchTitle.clean(ch.title),
+                        detail: ch.group,
+                        isPrimary: index == 0,
+                        isVN: true,
+                        chipChannel: ch,
+                        healthText: tvSourceHealthText(for: ch.url),
+                        unavailable: SourceHealth.status(for: ch.url) == .dead,
+                        playing: activeENItemID == nil && playingURL == ch.url,
+                        focused: switchFocus == "vn:" + ch.url,
+                        theme: theme)
+                }
+                .tvCardButton()
+                .focused($switchFocus, equals: "vn:" + ch.url)
+            }
+        }
+    }
+
+    private func designSwitchENSection(_ ctx: TVSwitchContext) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            designGroupHeader(title: "English",
+                              total: ctx.enItems.count,
+                              selectable: ctx.enItems.count)
+            ForEach(ctx.enItems) { item in
+                Button {
+                    pickEN(item, in: ctx)
+                } label: {
+                    TVDesignSourceRow(
+                        title: item.league ?? item.displayName,
+                        detail: item.league != nil ? item.displayName : "Nuvio",
+                        isPrimary: false,
+                        isVN: false,
+                        chipChannel: item.poster.isEmpty ? nil : item.displayChannel,
+                        healthText: "Chưa kiểm tra",
+                        unavailable: false,
+                        playing: activeENItemID == item.id,
+                        focused: switchFocus == "nv:" + item.id,
+                        theme: theme)
+                }
+                .tvCardButton()
+                .focused($switchFocus, equals: "nv:" + item.id)
+            }
+        }
+    }
+
+    /// The switch panel's group header (name + real counts
+    /// at the right) — the design board renders the same
+    /// line from its own copy (designBoardGroupHeader).
+    private func designGroupHeader(title: String, total: Int,
+                                   selectable: Int) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("\(total) nguồn · \(selectable) có thể chọn")
+                .font(.system(size: 17))
+                .foregroundStyle(theme.leagueTx)
+                .lineLimit(1)
+        }
+    }
+
     /// The board's row face with one addition: the playing row
     /// carries a check and "(đang phát)" so the eye lands on it
     /// before focus even moves.
@@ -329,6 +482,13 @@ private struct PlayerSurface: View {
     /// (1.6.0): the shell decides whether the match's pool is
     /// really spent (cross VN↔EN) or the slate stands.
     var onExhausted: (() -> Void)? = nil
+    /// The design theme's no-signal slate buttons (1.7.4, Q7):
+    /// retry rebuilds the surface on the same resolution (a
+    /// fresh ladder walk), close dismisses the player. Only
+    /// the design slate reads them; the classic / MU Wally
+    /// slate is text-only exactly as before.
+    var onRetry: (() -> Void)? = nil
+    var onClose: (() -> Void)? = nil
     /// A VN pick from the switch overlay (v1.4.1): the rung
     /// this surface must start on. The store's resolution is
     /// fixture-keyed — its ladder keeps the ORIGINAL tap's
@@ -350,6 +510,10 @@ private struct PlayerSurface: View {
     @State private var tried: Set<String> = []
     @State private var exhausted = false
     @State private var switching = true
+    /// Focus owner for the design slate's buttons (1.7.4):
+    /// asserted when the slate appears, so the remote lands
+    /// on "Thử lại" the moment the ladder settles exhausted.
+    @FocusState private var slateFocus: String?
     /// When the current rung started loading (1.4.4, item 2):
     /// stamped by pump() at every rung assignment, consumed by
     /// handleReady() — nil whenever no rung is in flight.
@@ -528,19 +692,254 @@ private struct PlayerSurface: View {
         ZStack {
             (theme.id.isMU ? theme.boardBG
                 : Color(red: 0.05, green: 0.07, blue: 0.08)).ignoresSafeArea()
-            VStack(spacing: 18) {
-                Text("MẤT TÍN HIỆU")
-                    .font(.system(size: 54, weight: .bold))
-                    .tracking(4)
-                    .foregroundStyle(.white)
-                Text("Tất cả các nguồn của trận này đều không phát được. Bấm Menu để quay lại.")
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.65))
+            if theme.id.isDesign {
+                designNoSignal
+            } else {
+                VStack(spacing: 18) {
+                    Text("MẤT TÍN HIỆU")
+                        .font(.system(size: 54, weight: .bold))
+                        .tracking(4)
+                        .foregroundStyle(.white)
+                    Text("Tất cả các nguồn của trận này đều không phát được. Bấm Menu để quay lại.")
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.65))
+                }
             }
         }
     }
+
+    /// The design theme's no-signal slate (1.7.4, Q7 — the
+    /// drawing's Player-no-signal): a centred panel with a
+    /// red top border, the gold broadcast (radiowaves) glyph
+    /// at the panel's TOP-LEFT — the drawing's mark and
+    /// placement (Round 1 review A-3) — and the three
+    /// actions wired to the shell — Thử lại rebuilds the
+    /// surface on the same resolution, Đổi nguồn opens the
+    /// switch panel (board sessions only, exactly when the
+    /// transport menu offers it), Đóng exits. These are
+    /// app-owned slate buttons, not transport chrome (the
+    /// native controls own the chrome, FL-129 untouched).
+    private var designNoSignal: some View {
+        VStack(spacing: 26) {
+            HStack {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 54))
+                    .foregroundStyle(theme.accent)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Không có tín hiệu")
+                .font(.system(size: 48, weight: .bold))
+                .foregroundStyle(.white)
+            Text("Tất cả các nguồn của trận này đều không phát được.")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.65))
+            HStack(spacing: 18) {
+                slateButton(title: "Thử lại", id: "slate:retry",
+                            primary: true) { onRetry?() }
+                if showsSwitchButton, let onSwitchButton {
+                    slateButton(title: "Đổi nguồn", id: "slate:switch",
+                                primary: false) { onSwitchButton() }
+                }
+                slateButton(title: "Đóng", id: "slate:close",
+                            primary: false) { onClose?() }
+            }
+            .padding(.top, 6)
+        }
+        .padding(48)
+        .frame(width: 1160)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(theme.boardBG)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(theme.tileBorder, lineWidth: 1.5)))
+        .overlay(alignment: .top) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(theme.unitedRed)
+                .frame(height: 5)
+                .padding(.horizontal, 16)
+                .padding(.top, 0)
+        }
+        .defaultFocus($slateFocus, "slate:retry")
+        .onAppear { slateFocus = "slate:retry" }
+    }
+
+    private func slateButton(title: String, id: String, primary: Bool,
+                             action: @escaping () -> Void) -> some View {
+        let focused = slateFocus == id
+        return Button(action: action) {
+            Text(title)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 34)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(primary ? theme.unitedRed : theme.tileBG)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(focused ? theme.focusRing
+                                                      : theme.tileBorder,
+                                              lineWidth: focused ? 3 : 1.5)))
+        }
+        .tvCardButton()
+        .focused($slateFocus, equals: id)
+    }
 }
 
+
+// MARK: - Design source row (1.7.4)
+
+/// The Q5 health line for one VN source URL, from the health
+/// memory's fresh record: a proven player reads "Đã kiểm
+/// tra · Hoạt động", a proven death "Không khả dụng", and
+/// everything else — no record, an expired record, or a
+/// merely-seen probe — "Chưa kiểm tra" (never dressed up as
+/// a confirmation). NO quality / signal fields exist anywhere
+/// in the design (answer Q5).
+func tvSourceHealthText(for url: String) -> String {
+    switch SourceHealth.status(for: url) {
+    case .ok: return "Đã kiểm tra · Hoạt động"
+    case .dead: return "Không khả dụng"
+    case .seen, nil: return "Chưa kiểm tra"
+    }
+}
+
+/// One source row under the design theme — the Detail
+/// drawing's row, shared by the source board and the
+/// in-player switch panel: cream logo chip (FIXED 68×52,
+/// FL-360), name + KHUYÊN DÙNG on the first VN row, the real
+/// sub-line (the channel's group + the position-derived
+/// primary/backup suffix for VN, the detail verbatim for EN),
+/// and the trailing slot: the health line + arrow, or — in
+/// the switch panel — the playing row's check. Focused =
+/// the family's maroon gradient + gold border. A PROVEN-DEAD
+/// source (the same SourceHealth value that produces its
+/// "Không khả dụng" health text) renders the drawn
+/// unavailable state (DetailSourceUnavailable, StateLibrary
+/// §02): the whole row dimmed — dark grey chip with the logo
+/// greyed on it, muted title, muted sub-line and health
+/// line (gate F-1).
+struct TVDesignSourceRow: View {
+    let title: String
+    let detail: String
+    let isPrimary: Bool
+    let isVN: Bool
+    let chipChannel: Channel?
+    let healthText: String
+    let unavailable: Bool
+    let playing: Bool
+    let focused: Bool
+    let theme: TVThemeTokens
+
+    private var sub: String {
+        if isVN {
+            let suffix = isPrimary ? "Nguồn chính" : "Nguồn dự phòng"
+            return detail.isEmpty ? suffix : detail + " · " + suffix
+        }
+        return detail
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(unavailable
+                        ? Color(white: 0.25)
+                        : Color(red: 0.96, green: 0.94, blue: 0.88))
+                Group {
+                    if let chipChannel, chipChannel.logoURL != nil {
+                        TVChannelLogo(channel: chipChannel, height: 44)
+                    } else {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(Color.black.opacity(0.55))
+                    }
+                }
+                // The unavailable row's logo greys and dims
+                // with the row (gate F-1): on the dark grey
+                // chip it reads as the drawing's greyed
+                // lettering, not the cream chip's full art.
+                .grayscale(unavailable ? 1 : 0)
+                .opacity(unavailable ? 0.45 : 1)
+            }
+            .frame(width: 68, height: 52)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 10) {
+                    Text(title)
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(unavailable
+                            ? Color.white.opacity(0.45) : .white)
+                        .lineLimit(1)
+                    if isVN && isPrimary {
+                        Text("KHUYÊN DÙNG")
+                            .font(.system(size: 15, weight: .bold))
+                            .tracking(1)
+                            .foregroundStyle(unavailable
+                                ? theme.accent.opacity(0.45) : theme.accent)
+                            .lineLimit(1)
+                    }
+                    if playing {
+                        Text("(đang phát)")
+                            .font(.system(size: 20))
+                            .foregroundStyle(unavailable
+                                ? theme.accent.opacity(0.45) : theme.accent)
+                            .lineLimit(1)
+                    }
+                }
+                Text(sub)
+                    .font(.system(size: 17))
+                    .foregroundStyle(unavailable
+                        ? theme.leagueTx.opacity(0.5) : theme.leagueTx)
+                    .lineLimit(1)
+                    .frame(height: 24, alignment: .leading)
+            }
+            Spacer(minLength: 0)
+            // The health text shows on EVERY row — the
+            // playing row included (the Player-sources
+            // drawing carries "Chưa kiểm tra" AND the ✓ on
+            // its playing row; Round 1 review A-2). Playing
+            // swaps the arrow for the check, nothing else.
+            HStack(spacing: 12) {
+                Text(healthText)
+                    .font(.system(size: 19))
+                    .foregroundStyle(unavailable
+                        ? theme.leagueTx.opacity(0.5) : theme.leagueTx)
+                    .lineLimit(1)
+                if playing {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(unavailable
+                            ? theme.accent.opacity(0.45) : theme.accent)
+                        .frame(width: 30)
+                } else {
+                    Image(systemName: focused ? "play.fill" : "arrow.right")
+                        .font(.system(size: 20))
+                        .foregroundStyle(focused ? theme.accent
+                                                 : (unavailable
+                                                    ? .white.opacity(0.18)
+                                                    : .white.opacity(0.35)))
+                        .frame(width: 30)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(focused
+                    ? AnyShapeStyle(LinearGradient(
+                        colors: [theme.tileFocusedBG, theme.minuteRed],
+                        startPoint: .leading, endPoint: .trailing))
+                    : AnyShapeStyle(theme.tileBG))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(focused ? theme.focusRing : theme.tileBorder,
+                                      lineWidth: focused ? 2.5 : 1)))
+    }
+}
 
 // MARK: - Link board (1.4.1, spec §2)
 
@@ -559,8 +958,9 @@ private struct PlayerSurface: View {
 /// §2.3a) — then LINK TIẾNG ANH · BLV ANH with one row per
 /// attached Nuvio event meta (§2.3b), the whole section omitted
 /// when nothing attached (fail closed — never faked). Focus
-/// starts on the first VN row (spec §2.6); the header is a
-/// static strip, never focusable. A row tap plays that row: VN
+/// starts on the detail's one small button (1.7.4; the
+/// header/detail is a static strip, never focusable) and
+/// moves to the first VN row when the list opens. A row tap plays that row: VN
 /// rows enter the player with the store's ladder rotated to the
 /// row (PlaylistStore.resolution(for:) is tapped-first by
 /// construction), EN rows resolve through the addon store.
@@ -574,6 +974,14 @@ struct TVMatchBoardView: View {
     @ObservedObject var nuvio: NuvioStore
     @Environment(\.dismiss) private var dismiss
     @State private var playRequest: BoardPlayRequest?
+    /// 1.7.4 (owner ruling 2026-11-22 01:56 CST, all three
+    /// themes): the board OPENS on the fixture's detail —
+    /// the Match Centre under the design theme, the info
+    /// column under MU Wally, the classic header under
+    /// Classic — and the source list stands behind ONE small
+    /// button. `showSources` is that button's state; Menu
+    /// closes the list back to the detail before it exits.
+    @State private var showSources = false
     @FocusState private var focusedRow: String?
 
     private struct BoardPlayRequest: Identifiable {
@@ -588,17 +996,78 @@ struct TVMatchBoardView: View {
         let vnURL: String?
     }
 
+    /// The focus id of the detail's one small button, per
+    /// theme — where focus lands when the board opens and
+    /// where it returns when the source list closes. Nil
+    /// when the button does not exist on the detail: under
+    /// MU Wally the watch button is omitted when both source
+    /// lists are empty (the shipped caller guard), so there
+    /// is nothing for opening focus to target (Round 1
+    /// review B-2). The design CTA always exists and is
+    /// always focusable (see centreCTA — the A-1 ruling),
+    /// and the classic button is unconditional.
+    private var detailFocusID: String? {
+        if theme.id.isDesign { return "design:cta" }
+        if theme.id.isMU { return totalSources > 0 ? "mu:watch" : nil }
+        return "classic:open"
+    }
+
+    /// The first source row's focus id (VN first, else EN) —
+    /// where focus lands when the source list opens.
+    private var firstRowID: String? {
+        vnSources.first.map { "vn:" + $0.url }
+            ?? enItems.first.map { "nv:" + $0.id }
+    }
+
+    private var totalSources: Int { vnSources.count + enItems.count }
+
+    /// "Có thể chọn" (the design's count): every source the
+    /// health memory has NOT proven dead — unchecked sources
+    /// included, exactly as the board's own note states. EN
+    /// items carry no pre-resolution health record, so they
+    /// all count.
+    private var selectableSources: Int {
+        vnSources.filter { SourceHealth.status(for: $0.url) != .dead }.count
+            + enItems.count
+    }
+
+    private func openSources() {
+        showSources = true
+        focusedRow = firstRowID
+    }
+
+    /// Menu on the board: with the source list open it closes
+    /// the list back to the detail; on the detail it exits.
+    private func handleBoardExit() {
+        if showSources {
+            showSources = false
+            focusedRow = detailFocusID
+        } else {
+            dismiss()
+        }
+    }
+
     var body: some View {
         Group {
-            if theme.id.isMU {
-                muBoard
+            if theme.id.isDesign {
+                if showSources {
+                    designBoard
+                } else {
+                    designCentre
+                }
+            } else if theme.id.isMU {
+                if showSources {
+                    muBoard
+                } else {
+                    muLanding
+                }
             } else {
                 classicBoard
             }
         }
-        .onExitCommand { dismiss() }
+        .onExitCommand { handleBoardExit() }
         .onAppear {
-            focusedRow = vnSources.first.map { "vn:" + $0.url }
+            focusedRow = showSources ? firstRowID : detailFocusID
             // 1.4.4 (spec §1.2): the board-open fixture earns
             // its on-demand FotMob detail fetch — the store
             // guards (FotMob state, events still empty) and
@@ -627,22 +1096,32 @@ struct TVMatchBoardView: View {
         }
     }
 
-    /// Classic board — the 1.6.0 code path verbatim (only the
-    /// palette constants are read through the theme tokens,
-    /// whose classic values ARE those constants).
+    /// Classic board — the 1.6.0 code path (only the palette
+    /// constants are read through the theme tokens, whose
+    /// classic values ARE those constants), with the ONE
+    /// sanctioned 1.7.4 change (owner ruling 2026-11-22
+    /// 01:56 CST): the header stands on the detail first and
+    /// the source sections open from one small button, the
+    /// same flow as the other two themes. The sections
+    /// themselves are untouched.
     private var classicBoard: some View {
         ZStack {
             theme.boardBG.ignoresSafeArea()
             VStack(alignment: .leading, spacing: 26) {
                 header
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 30) {
-                        vnSection
-                        if !enItems.isEmpty {
-                            enSection
+                if showSources {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 30) {
+                            vnSection
+                            if !enItems.isEmpty {
+                                enSection
+                            }
                         }
+                        .padding(.bottom, 10)
                     }
-                    .padding(.bottom, 10)
+                } else {
+                    classicSourceButton
+                    Spacer(minLength: 0)
                 }
             }
             .padding(.horizontal, 60)
@@ -651,15 +1130,48 @@ struct TVMatchBoardView: View {
         }
     }
 
+    /// The classic detail's one small button: the source
+    /// rows' own face (the classic arm of rowFaceBackground),
+    /// the rows' own leading glyph, and the real source
+    /// count at the right.
+    private var classicSourceButton: some View {
+        let focused = focusedRow == "classic:open"
+        return Button {
+            openSources()
+        } label: {
+            HStack(spacing: 16) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(focused ? theme.accent : .white.opacity(0.5))
+                Text("Chọn nguồn")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(focused ? theme.accent : .white)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("\(totalSources) nguồn")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            .background(rowFaceBackground(focused: focused, theme: theme))
+        }
+        .tvCardButton()
+        .focused($focusedRow, equals: "classic:open")
+    }
+
     // MARK: MU board (1.7.0 — IMPL-SPEC TVPlayerView section)
 
-    private var muBoard: some View {
+    /// The MU board backdrop (1.7.1 D1), shared verbatim by
+    /// the open board and the 1.7.4 landing: the current MU
+    /// wallpaper under a boardBG wash — the design's
+    /// stadium-art slot, fed by the app's real wallpaper
+    /// machinery — with the crimson gradient above it at
+    /// reduced strength.
+    private var muBackdrop: some View {
         ZStack {
             theme.boardBG.ignoresSafeArea()
-            // 1.7.1 (D1): the current MU wallpaper under a
-            // boardBG wash — the design's stadium-art slot, fed
-            // by the app's real wallpaper machinery. The crimson
-            // gradient rides above it at reduced strength.
             if let url = muWallpaperURL {
                 TVMUWallpaperLayer(url: url, dim: 0.82)
                     .ignoresSafeArea()
@@ -670,8 +1182,21 @@ struct TVMatchBoardView: View {
                 colors: [theme.unitedRed.opacity(0.10), theme.boardBG, .black],
                 startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
+        }
+    }
+
+    /// The open MU board (1.7.0/1.7.1 composition, verbatim):
+    /// the info column + the source column side by side.
+    /// 1.7.4: the timeline band now renders ONLY for a
+    /// fixture WITH a matched state — before, the band drew
+    /// its 0'/90' football scale unconditionally, so a
+    /// no-state or non-football fixture wore a football
+    /// timeline it has no data for (audit Q1 conviction).
+    private var muBoard: some View {
+        ZStack {
+            muBackdrop
             VStack(alignment: .leading, spacing: 26) {
-                muTopBar
+                muTopBar(board: true)
                 HStack(alignment: .top, spacing: 22) {
                     muLeftColumn
                     // 1.7.1 (D1): vertical hairline divider
@@ -683,11 +1208,709 @@ struct TVMatchBoardView: View {
                         .padding(.vertical, 6)
                     muRightColumn
                 }
-                timelineBand
+                if liveEntry.state != nil {
+                    timelineBand
+                }
             }
             .padding(.horizontal, 100)
             .padding(.top, 28)
             .padding(.bottom, 20)
+        }
+    }
+
+    /// The MU Wally landing (1.7.4, S3): the board's own info
+    /// column standing alone — same backdrop, same top bar
+    /// (without the board's CHỌN NGUỒN caps), same timeline
+    /// gate — with the column's one button opening the source
+    /// list (muWatchButton's landing arm). The look is the
+    /// shipped board's; only the source column moved behind
+    /// the button, per the owner's ruling.
+    private var muLanding: some View {
+        ZStack {
+            muBackdrop
+            VStack(alignment: .leading, spacing: 26) {
+                muTopBar(board: false)
+                HStack(alignment: .top, spacing: 22) {
+                    muLeftColumn
+                    Spacer(minLength: 0)
+                }
+                if liveEntry.state != nil {
+                    timelineBand
+                }
+            }
+            .padding(.horizontal, 100)
+            .padding(.top, 28)
+            .padding(.bottom, 20)
+        }
+    }
+
+    // MARK: Design Match Centre + board (1.7.4)
+
+    /// "League · dd/MM/yyyy · HH:mm" — the fixture's own
+    /// competition label and its device-local kickoff, shared
+    /// by the Match Centre and the design board (the drawing's
+    /// GMT+7 suffix is the mock's locale, not a design
+    /// element; the app never prints a foreign zone). NO
+    /// matchweek (answer Q8), NO stadium (Q2), NO Follow (Q3).
+    private var boardMetadata: String {
+        var parts = [entry.competitionLabel]
+        if let kickoff = entry.channel.kickoff {
+            parts.append(TVKickoffFormat.fullDate.string(from: kickoff))
+            parts.append(TVKickoffFormat.time.string(from: kickoff))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The Match Centre (delivery-united-tv-Match): the
+    /// design header, the centred league + metadata lines,
+    /// the giant central score between large crests, the
+    /// scorer lines, ONE red CTA noting the real source
+    /// count (disabled at zero sources), and — for football
+    /// fixtures WITH a matched state only — the timeline.
+    /// Every block sits in a FIXED slot (FL-360): a state
+    /// landing on an open centre changes contents, never
+    /// positions. The no-state form (answer Q1) centres "VS"
+    /// + "Không có dữ liệu tỷ số", shows TRỰC TIẾP only when
+    /// the fixture itself is live (never an invented minute),
+    /// and drops scorers + timeline entirely; a missing crest
+    /// is the team's initials tile, never a sport glyph.
+    private var designCentre: some View {
+        ZStack {
+            theme.boardBG.ignoresSafeArea()
+            if let url = muWallpaperURL {
+                TVMUWallpaperLayer(url: url, dim: 0.5)
+                    .ignoresSafeArea()
+                theme.boardBG.opacity(0.35)
+                    .ignoresSafeArea()
+            }
+            LinearGradient(
+                colors: [theme.boardBG.opacity(0.6), .clear,
+                         theme.boardBG.opacity(0.85)],
+                startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 0) {
+                TVDesignHeader()
+                Text("← Tất cả trận đấu")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+                    .padding(.top, 26)
+                centreLeagueBlock
+                centreMainRow
+                centreNamesRow
+                centreScorersRow
+                centreCTA
+                Spacer(minLength: 0)
+                if liveEntry.state != nil, liveEntry.teams != nil {
+                    designTimeline
+                }
+            }
+            .padding(.horizontal, 100)
+            .padding(.top, 28)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var centreLeagueBlock: some View {
+        VStack(spacing: 8) {
+            Text(entry.competitionLabel)
+                .font(.system(size: 17, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Text(boardMetadata)
+                .font(.system(size: 20))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 40)
+    }
+
+    private var centreMainRow: some View {
+        Group {
+            if let teams = liveEntry.teams {
+                HStack(alignment: .center, spacing: 0) {
+                    TVDesignCrestSlot(url: liveEntry.displayCrests?.0 ?? nil,
+                                      teamName: teams.0, size: 168, fontSize: 44)
+                        .frame(width: 500)
+                    centreScoreBlock
+                        .frame(width: 420)
+                    TVDesignCrestSlot(url: liveEntry.displayCrests?.1 ?? nil,
+                                      teamName: teams.1, size: 168, fontSize: 44)
+                        .frame(width: 500)
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                // Non-fixture entry: the channel's own art and
+                // name, centred — no face-off exists to draw.
+                VStack(spacing: 14) {
+                    TVChannelLogo(channel: entry.channel, height: 110)
+                    Text(entry.cleanTitle)
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 250)
+            }
+        }
+        .padding(.top, 26)
+    }
+
+    /// Score slot 176 + status slot 66, FIXED: the digits (or
+    /// "VS") never move when the status line changes.
+    private var centreScoreBlock: some View {
+        VStack(spacing: 8) {
+            Group {
+                if let state = liveEntry.state,
+                   let home = state.scoreHome, let away = state.scoreAway {
+                    TVScoreDigits(home: home, away: away,
+                                  size: 150, separator: " : ")
+                } else {
+                    Text("VS")
+                        .font(.system(size: 150, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(height: 176)
+            centreStatusSlot
+                .frame(height: 66, alignment: .top)
+        }
+    }
+
+    @ViewBuilder
+    private var centreStatusSlot: some View {
+        let state = liveEntry.state
+        if liveEntry.isLive {
+            if let state, state.scoreHome != nil {
+                HStack(spacing: 12) {
+                    centreLivePill
+                    if let minute = state.minuteText {
+                        Text(minute)
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(theme.accent)
+                    }
+                }
+            } else {
+                // Live with no score data (Q1): the word, the
+                // pill, and NO minute — the fixture says live,
+                // nothing more is claimed.
+                VStack(spacing: 8) {
+                    Text("Không có dữ liệu tỷ số")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white.opacity(0.6))
+                    centreLivePill
+                }
+            }
+        } else if let badge = liveEntry.badgeText {
+            // Any non-live fixture carrying a badge renders
+            // the badge — the board's arm 2, gated BEFORE
+            // the score-less arm, so a score-less FT keeps
+            // its "FT" instead of falling into the no-data
+            // line (gate A-v3-1b).
+            Text(badge)
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(theme.accent)
+        } else if state?.scoreHome == nil {
+            // Score-less or no state, not live, no badge:
+            // the board's arm 3 composition — the no-data
+            // line AND the kickoff line whenever a future
+            // kickoff exists (gate A-v2-1). A nil state
+            // lands here too (nil == nil), so the no-state
+            // form carries the no-data line its Q1 doc
+            // requires instead of the kickoff line alone
+            // or nothing (gate A-v3-1a). Opacities are the
+            // board's (0.7 / 1.0), aligned per Lens C's
+            // N-2 note.
+            VStack(spacing: 8) {
+                Text("Không có dữ liệu tỷ số")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.white.opacity(0.7))
+                if let kickoff = entry.channel.kickoff, kickoff > Date() {
+                    Text("Khởi tranh " + TVKickoffFormat.time.string(from: kickoff))
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        // Scored, non-live, badgeless (.pre / .postponed /
+        // .cancelled carrying a score): nothing renders —
+        // the board renders nothing for the same fixture.
+    }
+
+    private var centreLivePill: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(.white)
+                .frame(width: 9, height: 9)
+            Text("TRỰC TIẾP")
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 6).fill(theme.liveRed))
+    }
+
+    private var centreNamesRow: some View {
+        Group {
+            if let teams = liveEntry.teams {
+                HStack(alignment: .top, spacing: 0) {
+                    centreNameBlock(name: teams.0, side: "ĐỘI NHÀ")
+                        .frame(width: 500)
+                    Color.clear.frame(width: 420)
+                    centreNameBlock(name: teams.1, side: "ĐỘI KHÁCH")
+                        .frame(width: 500)
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                Color.clear
+            }
+        }
+        .frame(height: 122)
+    }
+
+    private func centreNameBlock(name: String, side: String) -> some View {
+        VStack(spacing: 6) {
+            Text(name)
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(height: 96, alignment: .top)
+            Text(side)
+                .font(.system(size: 15, weight: .semibold))
+                .tracking(2)
+                .foregroundStyle(theme.leagueTx)
+        }
+    }
+
+    /// The scorer lines under the names (FIXED 56 slot):
+    /// the matched state's goals per side, "Name 23'" joined
+    /// — the state's own facts only.
+    private var centreScorersRow: some View {
+        Group {
+            if let state = liveEntry.state, liveEntry.teams != nil {
+                HStack(alignment: .top, spacing: 0) {
+                    centreScorerText(state.homeGoals)
+                        .frame(width: 500)
+                    Color.clear.frame(width: 420)
+                    centreScorerText(state.awayGoals)
+                        .frame(width: 500)
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                Color.clear
+            }
+        }
+        .frame(height: 56)
+        .padding(.top, 10)
+    }
+
+    private func centreScorerText(_ goals: [MatchEvent]) -> some View {
+        Text(goals.map { "\($0.playerName) \($0.minuteText)" }
+                .joined(separator: " · "))
+            .font(.system(size: 20))
+            .foregroundStyle(.white.opacity(0.85))
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+    }
+
+    /// The ONE red CTA: "▶ Xem trận đấu" + the real counts.
+    /// It opens the source list (the owner's one-button
+    /// ruling) — it never plays directly, so its destination
+    /// is the board in every state. Round 1 review A-1
+    /// reconciliation: the contracted set contains BOTH the
+    /// Q3 line (CTA disabled at zero sources) AND the
+    /// Detail-zero-sources state drawing; disabling the CTA
+    /// made that drawing unreachable dead code, because this
+    /// CTA is the board's only door. The ruling applied:
+    /// the CTA stays focusable and opens the board at zero
+    /// sources too — where the designed zero state renders —
+    /// while its face drops the red fill for the muted tile
+    /// fill (below), so it reads unavailable, and playback
+    /// stays impossible (the board holds no rows). Q3's
+    /// intent — no watch action at zero sources — holds;
+    /// the zero-sources drawing is no longer dead.
+    private var centreCTA: some View {
+        let total = totalSources
+        let focused = focusedRow == "design:cta"
+        return HStack {
+            Spacer(minLength: 0)
+            Button {
+                openSources()
+            } label: {
+                HStack(spacing: 14) {
+                    Text("▶ Xem trận đấu")
+                        .font(.system(size: 23, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("\(total) nguồn · \(selectableSources) có thể chọn")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 26)
+                .frame(width: 470, height: 64)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(total == 0 ? theme.tileBG : theme.unitedRed)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(focused ? theme.focusRing : .clear,
+                                              lineWidth: 3)))
+            }
+            .tvCardButton()
+            .focused($focusedRow, equals: "design:cta")
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 30)
+    }
+
+    /// The centre timeline (football fixtures WITH state
+    /// only — the caller gates it): hairline, "Diễn biến",
+    /// the track with red progress to the state's own minute
+    /// and gold dots at GOAL minutes, each labelled with its
+    /// minute + scorer beneath. Positions are the parsed
+    /// minutes on the 90-minute scale — the shipped band's
+    /// honest scale; no 0'/90' edge labels (the drawing has
+    /// none here).
+    private var designTimeline: some View {
+        let state = liveEntry.state
+        let goals: [(minute: Int, text: String, name: String)] =
+            (state?.goals ?? [])
+                .compactMap { event in
+                    Self.parsedMinute(event.minuteText).map {
+                        (minute: $0, text: event.minuteText,
+                         name: event.playerName)
+                    }
+                }
+                .sorted { $0.minute < $1.minute }
+        let liveMinute = Self.parsedMinute(state?.minuteText)
+        return VStack(alignment: .leading, spacing: 12) {
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 1)
+            Text("Diễn biến")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.15))
+                        .frame(height: 3)
+                    if let liveMinute {
+                        Rectangle()
+                            .fill(theme.unitedRed)
+                            .frame(width: geo.size.width
+                                * CGFloat(min(max(liveMinute, 0), 90)) / 90,
+                                   height: 3)
+                    }
+                    ForEach(Array(goals.enumerated()), id: \.offset) { _, goal in
+                        Circle()
+                            .fill(theme.accent)
+                            .frame(width: 11, height: 11)
+                            .position(x: geo.size.width
+                                * CGFloat(min(max(goal.minute, 0), 90)) / 90,
+                                      y: geo.size.height / 2)
+                    }
+                }
+            }
+            .frame(height: 20)
+            GeometryReader { geo in
+                ZStack {
+                    ForEach(Array(goals.enumerated()), id: \.offset) { _, goal in
+                        VStack(spacing: 2) {
+                            Text(goal.text)
+                                .font(.system(size: 16))
+                                .foregroundStyle(theme.leagueTx)
+                                .lineLimit(1)
+                            Text(goal.name)
+                                .font(.system(size: 18))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 190)
+                        .position(x: min(max(geo.size.width
+                            * CGFloat(min(max(goal.minute, 0), 90)) / 90, 95),
+                                         geo.size.width - 95),
+                                  y: geo.size.height / 2)
+                    }
+                }
+            }
+            .frame(height: 52)
+        }
+    }
+
+    /// The design source board (delivery-united-tv-Detail):
+    /// the design header + "← Trận đấu", the info column
+    /// left (headline per Q4, crest row, status, the two
+    /// factual guidance lines), the source list right under
+    /// "Chọn nguồn phát" with per-group counts, the Q5 health
+    /// lines, and the verbatim unchecked-sources note. Both
+    /// groups always render — at zero sources they stand at
+    /// 0 with the drawing's empty message.
+    private var designBoard: some View {
+        ZStack {
+            theme.boardBG.ignoresSafeArea()
+            if let url = muWallpaperURL {
+                TVMUWallpaperLayer(url: url, dim: 0.82)
+                    .ignoresSafeArea()
+                theme.boardBG.opacity(0.55)
+                    .ignoresSafeArea()
+            }
+            VStack(alignment: .leading, spacing: 22) {
+                TVDesignHeader()
+                Text("← Trận đấu")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+                HStack(alignment: .top, spacing: 22) {
+                    designLeftColumn
+                    Rectangle()
+                        .fill(Color.white.opacity(0.10))
+                        .frame(width: 1)
+                        .padding(.vertical, 6)
+                    designRightColumn
+                }
+            }
+            .padding(.horizontal, 100)
+            .padding(.top, 28)
+            .padding(.bottom, 20)
+        }
+    }
+
+    /// Q4 headline size: the design's system heavy 50, down
+    /// to its 40 floor for long names; names wrap at word
+    /// boundaries inside the same two-column budget — the
+    /// column never widens and nothing is truncated
+    /// mid-word.
+    private var designHeadlineSize: CGFloat {
+        guard let teams = liveEntry.teams else { return 40 }
+        return max(teams.0.count, teams.1.count) > 20 ? 40 : 50
+    }
+
+    private var designLeftColumn: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(entry.competitionLabel)
+                .font(.system(size: 17, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Group {
+                if let teams = liveEntry.teams {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(teams.0.uppercased())
+                            .font(.system(size: designHeadlineSize, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .lineLimit(3)
+                        Text("vs")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(theme.leagueTx)
+                        Text(teams.1.uppercased())
+                            .font(.system(size: designHeadlineSize, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .lineLimit(3)
+                    }
+                } else {
+                    Text(liveEntry.headline)
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(3)
+                }
+            }
+            Text(boardMetadata)
+                .font(.system(size: 20))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+            designBoardCrestRow
+            designBoardStatus
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 1)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Có thể đổi nguồn trong trình phát.")
+                Text("Nguồn Tiếng Việt hiển thị trước English.")
+            }
+            .font(.system(size: 19))
+            .foregroundStyle(theme.leagueTx)
+        }
+        .frame(width: 580, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var designBoardCrestRow: some View {
+        if let teams = liveEntry.teams {
+            HStack(alignment: .center, spacing: 28) {
+                TVDesignCrestSlot(url: liveEntry.displayCrests?.0 ?? nil,
+                                  teamName: teams.0, size: 92, fontSize: 32)
+                Group {
+                    if let state = liveEntry.state,
+                       let home = state.scoreHome, let away = state.scoreAway {
+                        TVScoreDigits(home: home, away: away,
+                                      size: 64, separator: " : ")
+                    } else {
+                        Text("VS")
+                            .font(.system(size: 56, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                TVDesignCrestSlot(url: liveEntry.displayCrests?.1 ?? nil,
+                                  teamName: teams.1, size: 92, fontSize: 32)
+                Spacer(minLength: 0)
+            }
+            .frame(height: 96)
+        } else {
+            TVChannelLogo(channel: entry.channel, height: 84)
+                .frame(height: 96, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var designBoardStatus: some View {
+        if liveEntry.isLive {
+            HStack(spacing: 12) {
+                centreLivePill
+                if let minute = liveEntry.state?.minuteText {
+                    Text(minute)
+                        .font(.system(size: 22, weight: .bold))
+                        .italic()
+                        .foregroundStyle(theme.accent)
+                }
+            }
+            .frame(height: 34, alignment: .leading)
+        } else if let badge = liveEntry.badgeText {
+            Text(badge)
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(theme.accent)
+                .frame(height: 34, alignment: .leading)
+        } else if liveEntry.state?.scoreHome == nil {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Không có dữ liệu tỷ số")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.white.opacity(0.7))
+                if let kickoff = entry.channel.kickoff, kickoff > Date() {
+                    Text("Khởi tranh " + TVKickoffFormat.time.string(from: kickoff))
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+    }
+
+    private var designRightColumn: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Chọn nguồn phát")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text("\(totalSources) nguồn · \(selectableSources) có thể chọn")
+                        .font(.system(size: 20))
+                        .foregroundStyle(theme.leagueTx)
+                        .lineLimit(1)
+                }
+                designVNGroup
+                designENGroup
+                if totalSources == 0 {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.12))
+                            .frame(height: 1)
+                        Text("Chưa có nguồn phát cho trận đấu này. Quay lại để chọn trận khác.")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white.opacity(0.8))
+                            .lineLimit(2)
+                    }
+                }
+                Text("\"Có thể chọn\" bao gồm nguồn chưa kiểm tra; không xác nhận đang phát.")
+                    .font(.system(size: 17))
+                    .italic()
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(2)
+            }
+            .padding(.bottom, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var designVNGroup: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            designBoardGroupHeader(
+                title: "Tiếng Việt", total: vnSources.count,
+                selectable: vnSources.filter {
+                    SourceHealth.status(for: $0.url) != .dead
+                }.count)
+            ForEach(Array(vnSources.enumerated()), id: \.offset) { index, ch in
+                Button {
+                    playRequest = BoardPlayRequest(
+                        resolution: store.resolution(for: ch), enItemID: nil,
+                        vnURL: ch.url)
+                } label: {
+                    TVDesignSourceRow(
+                        title: MatchTitle.clean(ch.title),
+                        detail: ch.group,
+                        isPrimary: index == 0,
+                        isVN: true,
+                        chipChannel: ch,
+                        healthText: tvSourceHealthText(for: ch.url),
+                        unavailable: SourceHealth.status(for: ch.url) == .dead,
+                        playing: false,
+                        focused: focusedRow == "vn:" + ch.url,
+                        theme: theme)
+                }
+                .tvCardButton()
+                .focused($focusedRow, equals: "vn:" + ch.url)
+            }
+        }
+    }
+
+    private var designENGroup: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            designBoardGroupHeader(title: "English", total: enItems.count,
+                                   selectable: enItems.count)
+            ForEach(enItems) { item in
+                Button {
+                    playRequest = BoardPlayRequest(
+                        resolution: nuvio.resolution(for: item), enItemID: item.id,
+                        vnURL: nil)
+                } label: {
+                    TVDesignSourceRow(
+                        title: item.league ?? item.displayName,
+                        detail: item.league != nil ? item.displayName : "Nuvio",
+                        isPrimary: false,
+                        isVN: false,
+                        chipChannel: item.poster.isEmpty ? nil : item.displayChannel,
+                        healthText: "Chưa kiểm tra",
+                        unavailable: false,
+                        playing: false,
+                        focused: focusedRow == "nv:" + item.id,
+                        theme: theme)
+                }
+                .tvCardButton()
+                .focused($focusedRow, equals: "nv:" + item.id)
+            }
+        }
+    }
+
+    private func designBoardGroupHeader(title: String, total: Int,
+                                        selectable: Int) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("\(total) nguồn · \(selectable) có thể chọn")
+                .font(.system(size: 17))
+                .foregroundStyle(theme.leagueTx)
+                .lineLimit(1)
         }
     }
 
@@ -702,7 +1925,11 @@ struct TVMatchBoardView: View {
         return images[((themeStore.bgIndex % count) + count) % count]
     }
 
-    private var muTopBar: some View {
+    /// The MU top bar: the back label left; the board's
+    /// CHỌN NGUỒN caps at the right ONLY on the open board
+    /// (1.7.4: the landing has not opened the list yet, so
+    /// the caps would name a screen the viewer is not on).
+    private func muTopBar(board: Bool) -> some View {
         HStack(alignment: .center, spacing: 14) {
             // Non-focusable label — Menu is the real exit
             // (.onExitCommand on the board, unchanged).
@@ -715,11 +1942,13 @@ struct TVMatchBoardView: View {
             // live badge leaves the top row (the left column's
             // status row carries it); the right slot is the
             // design's coverage caps in app language.
-            Text("CHỌN NGUỒN")
-                .font(.system(size: 17, weight: .bold))
-                .tracking(2)
-                .foregroundStyle(theme.leagueTx)
-                .lineLimit(1)
+            if board {
+                Text("CHỌN NGUỒN")
+                    .font(.system(size: 17, weight: .bold))
+                    .tracking(2)
+                    .foregroundStyle(theme.leagueTx)
+                    .lineLimit(1)
+            }
         }
         .frame(height: 39)
     }
@@ -846,16 +2075,22 @@ struct TVMatchBoardView: View {
         .frame(width: 580, alignment: .leading)
     }
 
-    /// The Watch button: its action is EXACTLY the first source
-    /// row's action (VN first if any, else the first EN item),
-    /// building the same BoardPlayRequest that row builds. The
-    /// button is omitted by the caller when both lists are empty.
+    /// The board column's red button. On the OPEN board its
+    /// action is EXACTLY the first source row's action (VN
+    /// first if any, else the first EN item), building the
+    /// same BoardPlayRequest that row builds — the shipped
+    /// behaviour, verbatim. On the 1.7.4 LANDING the same
+    /// face is the detail's ONE small button: it opens the
+    /// source list and says so ("▶ Chọn nguồn"). The button
+    /// is omitted by the caller when both lists are empty.
     @ViewBuilder
     private var muWatchButton: some View {
         let total = vnSources.count + enItems.count
         let focused = focusedRow == "mu:watch"
         Button {
-            if let ch = vnSources.first {
+            if !showSources {
+                openSources()
+            } else if let ch = vnSources.first {
                 playRequest = BoardPlayRequest(
                     resolution: store.resolution(for: ch), enItemID: nil,
                     vnURL: ch.url)
@@ -868,7 +2103,7 @@ struct TVMatchBoardView: View {
             // 1.7.1 (D7): the design's two-part label — the
             // action left, the source count small at the right.
             HStack(spacing: 12) {
-                Text("▶ Xem ngay")
+                Text(showSources ? "▶ Xem ngay" : "▶ Chọn nguồn")
                     .font(.system(size: 26, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -1093,7 +2328,9 @@ struct TVMatchBoardView: View {
         return Int(digits)
     }
 
-    /// FIXED 84 pt slot, always present under MU (FL-360):
+    /// FIXED 84 pt slot (FL-360) whenever it renders — and
+    /// since 1.7.4 it renders only for a fixture WITH a
+    /// matched state (the call sites gate it; see muBoard):
     /// title 20 + track 20 + label row 24 with 10 pt spacings.
     /// Track + end labels always; the progress portion, the
     /// event dots and the goal/"Now" labels come only from
