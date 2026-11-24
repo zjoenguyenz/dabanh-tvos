@@ -389,6 +389,18 @@ struct TVThemePickerView: View {
     private static let bgRowID = "row:bgchange"
     private static let autoRowID = "row:autorotate"
 
+    /// The running build's version + build number (1.7.8;
+    /// owner law 2026-11-24: the version shows inside
+    /// Settings). Read from the bundle at runtime — never a
+    /// literal — so the pane can only ever name the build
+    /// that is actually running.
+    private var appVersionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
     /// The current MU wallpaper, if any (same indexing as the
     /// home background: the shared list in file order, indexed
     /// by the persisted choice).
@@ -403,9 +415,20 @@ struct TVThemePickerView: View {
         ZStack {
             VStack(alignment: .leading, spacing: 30) {
                 headerRow
-                Text("Giao diện")
-                    .font(pfont(40, .bold))
-                    .foregroundStyle(.white)
+                // 1.7.8: title block — the "Giao diện" title
+                // over the running build's version line
+                // (owner law 2026-11-24). The inner stack
+                // keeps the root column's 30 pt rhythm; the
+                // version line is a plain Text, never a focus
+                // stop, in the pane's secondary dress.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Giao diện")
+                        .font(pfont(40, .bold))
+                        .foregroundStyle(.white)
+                    Text("Phiên bản \(appVersionText)")
+                        .font(pfont(19))
+                        .foregroundStyle(theme.leagueTx)
+                }
                 HStack(spacing: 28) {
                     optionCard(
                         id: .classic,
