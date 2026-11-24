@@ -57,15 +57,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.7.8"
-        CURRENT_PROJECT_VERSION: "43"
+        MARKETING_VERSION: "1.7.9"
+        CURRENT_PROJECT_VERSION: "44"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.7.8"
-        CFBundleVersion: "43"
+        CFBundleShortVersionString: "1.7.9"
+        CFBundleVersion: "44"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

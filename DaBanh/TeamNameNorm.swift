@@ -554,6 +554,25 @@ enum TeamNameNorm {
         // has exactly one producer club in the snapshot
         // (the aarhus test):
         "al shamal sports": "al shamal",            // "Al-Shamal Sports Club" (sc/club filler) vs FotMob "Al Shamal"
+        // FL-482 (2026-11-24) — the al shamal shape again, on
+        // the fixture the owner caught live on Sony: the
+        // playlist's "Al-Sadd Sports Club" (JOHAN listing,
+        // kickoff 2026-11-25T01:15 ICT) beside FotMob's
+        // "Al-Sadd" (AFC Champions League Elite, FT 2–1).
+        // Measured unbound by dup-scan run 20261124T132437:
+        // playlist pair "al nassr vs al sadd sports" sits in
+        // unbound_with_feed with the FotMob pair "al nassr vs
+        // al sadd" as its near pair — the home side already
+        // converges ("Al Nassr" / "Al Nassr FC" → "al nassr",
+        // fc is filler), the away side strands on "sports".
+        // "sports" is deliberately NOT added to fillerTokens:
+        // a filler drop is symmetric across every layer
+        // (grouping, binding, crest keys) and unmeasured
+        // beyond this fixture; the whole-name alias is the
+        // measured fix, exactly as Al Shamal above. The
+        // "al sadd" stem has exactly one producer club
+        // (the aarhus test).
+        "al sadd sports": "al sadd",
         "esteghlal tehran": "esteghlal",            // playlist city suffix vs FotMob "Esteghlal"
         "tractor c": "tractor",                     // "Tractor S.C." — bare c survives step 1 (the juventus shape)
         "atalanta b c": "atalanta",                 // "Atalanta B.C." vs ESPN "Atalanta"
