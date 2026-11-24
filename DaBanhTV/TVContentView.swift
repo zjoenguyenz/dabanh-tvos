@@ -515,7 +515,7 @@ struct TVContentView: View {
                     .onChange(of: geo.size.width) { _, w in contentWidth = w }
             }
             .padding(.horizontal, 0)
-            VStack(spacing: 12) {
+            VStack(spacing: theme.id.isMU ? 8 : 12) {
                 header
                 tabBar
                 // 1.4.9 (FL-360, audit S-1): the status line's
@@ -980,7 +980,7 @@ struct TVContentView: View {
             Rectangle()
                 .fill(Color.white.opacity(0.14))
                 .frame(height: 1)
-                .padding(.top, 10)
+                .padding(.top, 2)
         }
     }
 
@@ -1004,7 +1004,7 @@ struct TVContentView: View {
         // row one because every pill in the bar now shares the
         // same SMALL uniform metrics (see tabPill): the bar is
         // compact and does not grow — it shrinks.
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: theme.id.isMU ? 4 : 6) {
             HStack(spacing: 12) {
                 if theme.id.isDesign {
                     // 1.7.5 (RECALC-DABANH H3): the design
@@ -1064,7 +1064,7 @@ struct TVContentView: View {
                     }
                     .font(.system(size: 20, weight: .medium))
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, theme.id.isMU ? 6 : 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:refresh",
                                            selected: false, theme: theme))
                 }
@@ -1085,7 +1085,7 @@ struct TVContentView: View {
                     }
                     .font(.system(size: 20, weight: .medium))
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, theme.id.isMU ? 6 : 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:check",
                                            selected: false, theme: theme))
                 }
@@ -1106,7 +1106,7 @@ struct TVContentView: View {
                     }
                     .font(.system(size: 20, weight: .medium))
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, theme.id.isMU ? 6 : 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:log",
                                            selected: false, theme: theme))
                 }
@@ -1128,7 +1128,7 @@ struct TVContentView: View {
                     }
                     .font(.system(size: 20, weight: .medium))
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, theme.id.isMU ? 6 : 10)
                     .background(TVPillFace(focused: focusedKey == "hdr:theme",
                                            selected: false, theme: theme))
                 }
@@ -1323,7 +1323,7 @@ struct TVContentView: View {
                 // only the panel's rendering is skipped.
                 if !theme.id.isMU { heroPanel }
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: theme.id.isMU ? 8 : 12) {
                         if theme.id.isMU {
                             // 1.7.1 (table H7): under MU there is
                             // no featured rail — the featured
@@ -1395,7 +1395,7 @@ struct TVContentView: View {
                         }
                         footerRow
                     }
-                    .padding(.top, 2)
+                    .padding(.top, theme.id.isMU ? 0 : 2)
                     .padding(.bottom, 10)
                 }
             }
@@ -2190,7 +2190,7 @@ struct TVContentView: View {
 /// no capsule. Selected = white semibold label, a red dot in a
 /// FIXED 8 pt slot before it, a gold outline, and a red
 /// underline bar drawn INSIDE the face's bounds. The face has
-/// a FIXED height of 58 in every state (selected or not,
+/// a FIXED height of 50 in every state (selected or not,
 /// focused or not); the underline (56×4) sits in an
 /// overlay(alignment: .bottom) with 5 pt bottom padding, fully
 /// inside the frame, so it never paints over the action-pill
@@ -2232,12 +2232,12 @@ private struct TVMUTabFace: View {
             }
         }
         .padding(.horizontal, 16)
-        // FIXED height 58 in BOTH states (selected or not,
+        // FIXED height 50 in BOTH states (selected or not,
         // focused or not): the label content is centred in
         // this frame and the underline overlays its bottom
         // edge from INSIDE — nothing paints outside the
         // face's bounds.
-        .frame(height: 58)
+        .frame(height: 50)
         .background {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)

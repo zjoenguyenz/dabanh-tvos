@@ -1414,7 +1414,9 @@ struct TVMatchBoardView: View {
                         .padding(.vertical, 6)
                     muRightColumn
                 }
-                if liveEntry.state != nil {
+                // 1.7.7 (item c): a bound NBA state must not
+                // switch ON the football 90-minute timeline.
+                if liveEntry.state != nil, liveEntry.competition != .nba {
                     timelineBand
                 }
             }
@@ -1440,7 +1442,9 @@ struct TVMatchBoardView: View {
                     muLeftColumn
                     Spacer(minLength: 0)
                 }
-                if liveEntry.state != nil {
+                // 1.7.7 (item c): same NBA timeline exclusion
+                // as the MU board gate above.
+                if liveEntry.state != nil, liveEntry.competition != .nba {
                     timelineBand
                 }
             }
@@ -1502,7 +1506,11 @@ struct TVMatchBoardView: View {
                 centreScorersRow
                 centreCTA
                 Spacer(minLength: 0)
-                if liveEntry.state != nil, liveEntry.teams != nil {
+                // 1.7.7 (item c): same NBA timeline exclusion
+                // as the MU board gates — no football timeline
+                // for a bound basketball state.
+                if liveEntry.state != nil, liveEntry.teams != nil,
+                   liveEntry.competition != .nba {
                     designTimeline
                 }
                 // 1.7.5 (C14): the centre's fixed footer

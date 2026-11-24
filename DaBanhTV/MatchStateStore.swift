@@ -58,8 +58,12 @@ enum MatchSource: Equatable, Sendable {
 }
 
 /// One goal or card event of a matched fixture.
-struct MatchEvent: Equatable, Sendable {
-    enum Kind: Equatable, Sendable { case goal, yellowCard, redCard }
+/// 1.7.7 (item d): Codable so the settled-detail ledger can
+/// persist finished matches' events across launches — every
+/// stored property was already String/Int/Bool, so the
+/// conformance is synthesised and changes no behaviour.
+struct MatchEvent: Equatable, Sendable, Codable {
+    enum Kind: Equatable, Sendable, Codable { case goal, yellowCard, redCard }
     let kind: Kind
     let minuteText: String
     let playerName: String
@@ -214,6 +218,18 @@ enum MatchPairKey {
     }
 }
 
+/// One persisted settled FotMob detail answer (1.7.7, item
+/// d): the events a finished match's matchDetails call
+/// returned — an EMPTY list is a valid settled answer (a
+/// goalless, card-less FT match) and persists like any other.
+/// File-scope (not nested in the @MainActor store) so its
+/// Codable conformance carries no actor isolation, mirroring
+/// the SourceHealth entry shape in PlaylistStore.
+private struct SettledDetail: Codable {
+    let events: [MatchEvent]
+    let fetchedAt: Date
+}
+
 @MainActor
 final class MatchStateStore: ObservableObject {
 
@@ -238,6 +254,21 @@ final class MatchStateStore: ObservableObject {
     /// a live snapshot to "final" the moment the match ends,
     /// losing its last events — review round 1.)
     private var fotmobDetailCache: [Int: (events: [MatchEvent], fetchedAt: Date, final: Bool)] = [:]
+    /// 1.7.7 (item d): the persisted SETTLED half of the
+    /// detail ledger above, keyed by String(fotmobID) in
+    /// UserDefaults (the SourceHealth storage pattern). Only
+    /// final answers ever enter it — live snapshots stay
+    /// RAM-only under the 120 s rule. Loaded into
+    /// fotmobDetailCache (final: true) by start(); written
+    /// through synchronously at the two cache-store sites the
+    /// moment an entry becomes final. Before 1.7.7 the whole
+    /// ledger was RAM-only, so every cold launch re-fetched
+    /// detail for every FotMob-won finished match at the
+    /// 4-per-cycle cap.
+    private var settledDetails: [String: SettledDetail] = [:]
+    private static let settledDetailKey = "dabanh-fotmob-detail-settled"
+    private static let settledDetailCap = 1000
+    private static let settledDetailMaxAge: TimeInterval = 7 * 24 * 3600
     /// The pair key of the fixture the hero panel is showing
     /// (1.4.8): the view layer registers it, the cycle's detail
     /// pass serves that pair first. The hero is the most
@@ -258,6 +289,11 @@ final class MatchStateStore: ObservableObject {
 
     func start(fixturesProvider: @escaping () -> [Channel]) {
         self.fixturesProvider = fixturesProvider
+        // 1.7.7 (item d): restore the settled ledger BEFORE
+        // the poll task begins, so the first cycle already
+        // treats settled fixtures as final-fresh and spends
+        // its detail budget only on genuinely new finishes.
+        loadSettledDetails()
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -266,6 +302,48 @@ final class MatchStateStore: ObservableObject {
                 let live = self.hasLiveScope()
                 try? await Task.sleep(for: .seconds(live ? Self.livePoll : Self.idlePoll))
             }
+        }
+    }
+
+    /// 1.7.7 (item d): decode the persisted settled ledger
+    /// into the RAM cache with final: true. Entries older
+    /// than 7 days are dropped on load (a settled entry's
+    /// only consumer is a same-week board). A persisted EMPTY
+    /// events list loads too — it is the settled answer for a
+    /// goalless/card-less FT match, and loading it is what
+    /// stops that match's refetch. Synchronous UserDefaults
+    /// work on the actor, mirroring SourceHealth.
+    private func loadSettledDetails() {
+        guard let data = UserDefaults.standard.data(forKey: Self.settledDetailKey),
+              let decoded = try? JSONDecoder().decode([String: SettledDetail].self, from: data)
+        else { return }
+        let cutoff = Date().addingTimeInterval(-Self.settledDetailMaxAge)
+        var table: [String: SettledDetail] = [:]
+        for (key, entry) in decoded where entry.fetchedAt >= cutoff {
+            guard let fid = Int(key) else { continue }
+            table[key] = entry
+            fotmobDetailCache[fid] = (events: entry.events,
+                                      fetchedAt: entry.fetchedAt, final: true)
+        }
+        settledDetails = table
+    }
+
+    /// 1.7.7 (item d): write one newly-final answer through
+    /// to the persisted ledger, synchronously. Bounded at
+    /// 1,000 entries, oldest by fetchedAt evicted first (the
+    /// SourceHealth cap discipline). Callers invoke this ONLY
+    /// for final entries — live snapshots never persist.
+    private func persistSettledDetail(fid: Int, events: [MatchEvent], fetchedAt: Date) {
+        settledDetails[String(fid)] = SettledDetail(events: events, fetchedAt: fetchedAt)
+        if settledDetails.count > Self.settledDetailCap {
+            let oldest = settledDetails
+                .sorted { $0.value.fetchedAt < $1.value.fetchedAt }
+                .prefix(settledDetails.count - Self.settledDetailCap)
+                .map { $0.key }
+            for key in oldest { settledDetails.removeValue(forKey: key) }
+        }
+        if let data = try? JSONEncoder().encode(settledDetails) {
+            UserDefaults.standard.set(data, forKey: Self.settledDetailKey)
         }
     }
 
@@ -332,8 +410,16 @@ final class MatchStateStore: ObservableObject {
                 let prior = fotmobDetailCache[fid]?.events ?? []
                 if events.count >= prior.count,
                    !events.isEmpty || states[key]?.status == .ft {
-                    fotmobDetailCache[fid] = (events: events, fetchedAt: Date(),
-                                               final: states[key]?.status == .ft)
+                    let stamp = Date()
+                    let isFinal = states[key]?.status == .ft
+                    fotmobDetailCache[fid] = (events: events, fetchedAt: stamp,
+                                               final: isFinal)
+                    // 1.7.7 (item d): a final answer also
+                    // writes through to the persisted ledger,
+                    // so it survives the next cold launch.
+                    if isFinal {
+                        persistSettledDetail(fid: fid, events: events, fetchedAt: stamp)
+                    }
                 }
                 applyBoardDetail(events, fid: fid, key: key)
             }
@@ -619,11 +705,20 @@ final class MatchStateStore: ObservableObject {
         let days = Self.espnDays(now: now)
         let todayICT = Self.ictDateKey(now)
         async let espnResult = Self.fetchESPN(slugs: CompetitionID.espnSlugs, days: days)
+        // 1.7.7 (item c): the fifth layer — ESPN basketball
+        // (NBA), fetched in the same Eastern day window. Its
+        // states join the precedence merge directly AFTER the
+        // ESPN soccer layer (pair keys cannot collide with
+        // soccer pairs in practice; the order is
+        // belt-and-braces).
+        async let basketballResult = Self.fetchESPNBasketball(days: days)
         async let fotmobResult = Self.fetchFotMobMerged(now: now)
         async let flashscoreResult = Self.fetchFlashscore()
         async let livescoreResult = Self.fetchLiveScore(todayKey: todayICT)
         let results = await [espnResult, fotmobResult, flashscoreResult, livescoreResult]
-        let layers = results.map { $0.states }
+        let basketball = await basketballResult
+        let layers = [results[0].states, basketball.states, results[1].states,
+                      results[2].states, results[3].states]
 
         // Precedence ESPN > FotMob > Flashscore > LiveScore, wholesale per
         // fixture key (plan §1.4): a lower layer never overwrites
@@ -718,6 +813,13 @@ final class MatchStateStore: ObservableObject {
                        !events.isEmpty || state.status == .ft {
                         fotmobDetailCache[fid] = (events: events, fetchedAt: now,
                                                    final: state.status == .ft)
+                        // 1.7.7 (item d): a final answer also
+                        // writes through to the persisted
+                        // ledger, so it survives the next cold
+                        // launch. Live answers never persist.
+                        if state.status == .ft {
+                            persistSettledDetail(fid: fid, events: events, fetchedAt: now)
+                        }
                     }
                     merged[key] = state.withEvents(applied)
                 } else if let cached {
@@ -764,15 +866,17 @@ final class MatchStateStore: ObservableObject {
         // counts, the merged total, the ESPN day window used —
         // plus the live-window fixtures no layer bound (the
         // bind-miss evidence ĐG-3 made impossible to collect).
-        DiagLog.write("poll", "espn=\(layers[0].count) fotmob=\(layers[1].count) "
-            + "flash=\(layers[2].count) livescore=\(layers[3].count) "
+        DiagLog.write("poll", "espn=\(layers[0].count) nba=\(layers[1].count) "
+            + "fotmob=\(layers[2].count) "
+            + "flash=\(layers[3].count) livescore=\(layers[4].count) "
             + "merged=\(next.count) espnDays=\(days.joined(separator: ","))")
         // 1.4.4, item 3: how each layer's FETCH ended this
         // cycle — "ok states=N" (answered; N may be 0) is now
         // distinguishable from "http-403"/"error"/"decode"
         // (never answered), which the counts line alone cannot
         // express.
-        DiagLog.write("fetch", "espn: \(results[0].report) · fotmob: \(results[1].report) "
+        DiagLog.write("fetch", "espn: \(results[0].report) · nba: \(basketball.report) "
+            + "· fotmob: \(results[1].report) "
             + "· flash: \(results[2].report) · livescore: \(results[3].report)")
         if let fixtures = fixturesProvider?() {
             var misses: [String] = []
@@ -1084,6 +1188,14 @@ final class MatchStateStore: ObservableObject {
                 }
                 let type: Kind?
                 let displayClock: String?
+                /// The game period (1.7.7, item c): basketball
+                /// only — 1–4 are quarters, 5+ are overtime
+                /// periods. Soccer payloads omit it (verified
+                /// against the captured NBA scoreboard payload,
+                /// work-177/espn-nba-sample.json: status.period
+                /// is an Int on every event). Optional, so the
+                /// soccer decode is unchanged.
+                let period: Int?
             }
             let date: String?
             let competitions: [Competition]?
@@ -1208,6 +1320,136 @@ final class MatchStateStore: ObservableObject {
                 scoreHome: home.score.flatMap { Int($0) },
                 scoreAway: away.score.flatMap { Int($0) },
                 events: events, source: .espn, fetchedAt: Date(),
+                kickoff: kickoff, fotmobID: nil,
+                homeName: homeName, awayName: awayName,
+                logoHome: home.team?.logo, logoAway: away.team?.logo))
+        }
+        return BoardFetch(slug: slug, day: day, states: out, outcome: "ok")
+    }
+
+    // MARK: - ESPN basketball (NBA, 1.7.7 item c)
+
+    /// The basketball twin of fetchESPN: same BoardFetch /
+    /// LayerResult reporting shape, same Eastern day window,
+    /// but the slug table is CompetitionID.espnBasketballSlugs
+    /// and the URL is the BASKETBALL sport path — the soccer
+    /// slug list and URL are untouched. Field shapes verified
+    /// against a captured live payload
+    /// (work-177/espn-nba-sample.json, 2026-11-23): every
+    /// event carries status.period (Int; 4 = Q4, 5 = first
+    /// OT), status.displayClock ("9:32"), status.type
+    /// (state "in"/"post", completed, detail "9:32 - 4th
+    /// Quarter" / "Final" / "Final/OT", name
+    /// STATUS_IN_PROGRESS / STATUS_FINAL), competitors[]
+    /// .score as a String, team.displayName and team.logo.
+    /// NBA competitions carry NO details array, so states are
+    /// built with events: [] — basketball has no goal/card
+    /// events and MatchEvent.Kind gains no basketball kinds.
+    nonisolated private static func fetchESPNBasketball(days: [String]) async -> LayerResult {
+        var out: [String: MatchState] = [:]
+        var okBoards = 0
+        var totalBoards = 0
+        var firstFailure: String? = nil
+        await withTaskGroup(of: BoardFetch.self) { group in
+            for slug in CompetitionID.espnBasketballSlugs {
+                for day in days {
+                    group.addTask { await fetchESPNBasketballBoard(slug: slug, day: day) }
+                }
+            }
+            for await board in group {
+                totalBoards += 1
+                if board.outcome == "ok" { okBoards += 1 }
+                else {
+                    if firstFailure == nil { firstFailure = board.outcome }
+                    DiagLog.write("fetch", "espn basketball board fail slug=\(board.slug) "
+                        + "day=\(board.day) outcome=\(board.outcome)")
+                }
+                for s in board.states { out[s.storageKey] = s }
+            }
+        }
+        let report: String
+        if okBoards == totalBoards {
+            report = "ok states=\(out.count) boards=\(okBoards)/\(totalBoards)"
+        } else if okBoards == 0 {
+            report = "\(firstFailure ?? "error") states=0 boards=0/\(totalBoards)"
+        } else {
+            report = "partial states=\(out.count) boards=\(okBoards)/\(totalBoards) "
+                + "fail=\(firstFailure ?? "error")"
+        }
+        return LayerResult(states: out, report: report)
+    }
+
+    nonisolated private static func fetchESPNBasketballBoard(slug: String, day: String) async -> BoardFetch {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/\(slug)/scoreboard?dates=\(day)") else {
+            return BoardFetch(slug: slug, day: day, states: [], outcome: "error")
+        }
+        let data: Data
+        switch await getDetailed(url) {
+        case .ok(let payload): data = payload
+        case .http(let code): return BoardFetch(slug: slug, day: day, states: [], outcome: "http-\(code)")
+        case .failed: return BoardFetch(slug: slug, day: day, states: [], outcome: "error")
+        }
+        guard let board = try? JSONDecoder().decode(ESPNBoard.self, from: data) else {
+            return BoardFetch(slug: slug, day: day, states: [], outcome: "decode")
+        }
+        let competition = CompetitionID(espnSlug: slug)
+        var out: [MatchState] = []
+        for event in board.events ?? [] {
+            guard let comp = event.competitions?.first,
+                  let competitors = comp.competitors,
+                  let home = competitors.first(where: { $0.homeAway == "home" }),
+                  let away = competitors.first(where: { $0.homeAway == "away" }),
+                  let homeName = home.team?.displayName,
+                  let awayName = away.team?.displayName,
+                  let pair = MatchPairKey.key(home: homeName, away: awayName) else { continue }
+            // Status mapping reuses the soccer rules verbatim
+            // (the HALF test also catches basketball's
+            // "Halftime" detail).
+            let type = event.status?.type
+            let status: MatchStatus
+            if type?.completed == true { status = .ft }
+            else if type?.state == "in" {
+                let marker = ((type?.detail ?? "") + " " + (type?.name ?? "")).uppercased()
+                status = marker.contains("HALF") ? .ht : .live
+            } else if (type?.name ?? "").uppercased().contains("POSTPON") { status = .postponed }
+            else if (type?.name ?? "").uppercased().contains("CANCEL") { status = .cancelled }
+            else { status = .pre }
+            let kickoff = event.date.flatMap { isoDate($0) }
+            let dateKey = kickoff.map { FixtureGrouping.stampDateKey(of: $0) } ?? ""
+            guard !dateKey.isEmpty else { continue }
+            // The composed game clock for a live state:
+            // "Q<period> <displayClock>", overtime periods
+            // counting past 4 as "OT<n> …". Nil for every
+            // non-live status. When the payload omits the
+            // period, the raw displayClock stands alone —
+            // never a fabricated quarter.
+            let minuteText: String?
+            if status == .live {
+                if let period = event.status?.period,
+                   let clock = event.status?.displayClock {
+                    minuteText = period > 4 ? "OT\(period - 4) \(clock)" : "Q\(period) \(clock)"
+                } else {
+                    minuteText = event.status?.displayClock
+                }
+            } else {
+                minuteText = nil
+            }
+            // Team logos ride the same learned-registry +
+            // state-logo path as the soccer ESPN layer, so the
+            // views' ESPN crest fallback works unchanged.
+            if let s = home.team?.logo, let u = URL(string: s) {
+                Crests.registerLearnedLogo(forTeam: homeName, logoURL: u)
+            }
+            if let s = away.team?.logo, let u = URL(string: s) {
+                Crests.registerLearnedLogo(forTeam: awayName, logoURL: u)
+            }
+            out.append(MatchState(
+                pairKey: pair, dateKey: dateKey, competition: competition,
+                status: status,
+                minuteText: minuteText,
+                scoreHome: home.score.flatMap { Int($0) },
+                scoreAway: away.score.flatMap { Int($0) },
+                events: [], source: .espn, fetchedAt: Date(),
                 kickoff: kickoff, fotmobID: nil,
                 homeName: homeName, awayName: awayName,
                 logoHome: home.team?.logo, logoAway: away.team?.logo))

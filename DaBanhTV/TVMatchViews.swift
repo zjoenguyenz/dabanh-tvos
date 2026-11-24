@@ -1497,11 +1497,11 @@ struct TVENChannelRail: View {
 // classic theme's render is untouched. The MU cards share ONE
 // fixed geometry in every state (FL-360): width =
 // tvMUCardWidth (published by the root, ≈421 at the design's
-// 1760 content width), height 272, radius 12, and every
-// interior slot is FIXED — header 40, centre 92, names 56,
+// 1760 content width), height 276, radius 12, and every
+// interior slot is FIXED — header 40, centre 92, names 60,
 // hairline 1, footer 24 (+8 top padding), vertical padding
 // 16×2, and the flexible spacer taking exactly the remainder:
-// 16 + 40 + 92 + 56 + 19 (spacer) + 1 + 8 + 24 + 16 = 272.
+// 16 + 40 + 92 + 60 + 19 (spacer) + 1 + 8 + 24 + 16 = 276.
 // Focus is the house cure only: tvCardButton() on the rail
 // buttons and the drawn face (tvMUCardBackground) — no second
 // focus layer, no scaling anywhere.
@@ -1610,7 +1610,7 @@ struct TVMUMatchCard: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
-        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .frame(width: cardWidth, height: 276, alignment: .topLeading)
         .background(tvMUCardBackground(focused: focused, theme: theme))
     }
 
@@ -1721,7 +1721,7 @@ struct TVMUMatchCard: View {
         }
     }
 
-    // Names, FIXED 56: each name centred under its crest (the
+    // Names, FIXED 60: each name centred under its crest (the
     // 150 centre spacer keeps the two columns over the centre
     // row's), or the cleaned title centred for a non-fixture.
     private var namesRow: some View {
@@ -1733,6 +1733,7 @@ struct TVMUMatchCard: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
@@ -1740,6 +1741,7 @@ struct TVMUMatchCard: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                 }
@@ -1748,11 +1750,12 @@ struct TVMUMatchCard: View {
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
             }
         }
-        .frame(height: 56)
+        .frame(height: 60)
     }
 
     // Footer, FIXED 24 (+8 top padding): the representative
@@ -1786,7 +1789,7 @@ struct TVMUMatchCard: View {
 /// ≈40 pt; the fixed 50 slot still holds the line), the
 /// rail's real count as a "%02d" chip in the accent family,
 /// and an optional right-aligned note (the SẮP ĐÁ rail's
-/// device date — W-B passes it). FIXED height 50.
+/// device date — W-B passes it). FIXED height 44.
 struct TVMURailHeader: View {
     @Environment(\.tvTheme) private var theme
     let title: String
@@ -1816,13 +1819,13 @@ struct TVMURailHeader: View {
                     .lineLimit(1)
             }
         }
-        .frame(height: 50)
+        .frame(height: 44)
     }
 }
 
 /// One horizontal rail of MU fixture cards (1.7.1): the MU
 /// header over a LazyHStack of TVMUMatchCards at the design's
-/// 22 pt gap. The card slot is 280 FIXED (272 + 2×4 insets)
+/// 22 pt gap. The card slot is 284 FIXED (276 + 2×4 insets)
 /// for every state — one card shape, no live-dependent slot.
 /// Focus lives here, at the leaf, exactly as TVFixtureRail's
 /// (KH-2): own @FocusState, keys reported upward, signposted.
@@ -1836,7 +1839,7 @@ struct TVMUFixtureRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVMURailHeader(title: title, count: entries.count, note: note)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 22) {
@@ -1849,7 +1852,7 @@ struct TVMUFixtureRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: keyFor(entry))
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1895,7 +1898,7 @@ struct TVMUNuvioEventCard: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
-        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .frame(width: cardWidth, height: 276, alignment: .topLeading)
         .background(tvMUCardBackground(focused: focused, theme: theme))
     }
 
@@ -1980,7 +1983,7 @@ struct TVMUNuvioEventCard: View {
         }
     }
 
-    // Names, FIXED 56: the two sides under their crests, or
+    // Names, FIXED 60: the two sides under their crests, or
     // the item's display name centred for a team-less meta.
     private var namesRow: some View {
         Group {
@@ -1993,6 +1996,7 @@ struct TVMUNuvioEventCard: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
@@ -2000,6 +2004,7 @@ struct TVMUNuvioEventCard: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                 }
@@ -2008,11 +2013,12 @@ struct TVMUNuvioEventCard: View {
                     .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
             }
         }
-        .frame(height: 56)
+        .frame(height: 60)
     }
 
     // Footer, FIXED 24 (+8 top padding): a fixture meta
@@ -2041,7 +2047,7 @@ struct TVMUNuvioEventCard: View {
 
 /// One horizontal rail of MU Nuvio EVENT cards (1.7.1):
 /// TVNuvioEventRail's signature and focus pattern, the MU
-/// header and cards, the design's 22 pt gap, slot 280 FIXED.
+/// header and cards, the design's 22 pt gap, slot 284 FIXED.
 struct TVMUNuvioEventRail: View {
     let title: String
     let items: [NuvioItem]
@@ -2050,7 +2056,7 @@ struct TVMUNuvioEventRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVMURailHeader(title: title, count: items.count)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 22) {
@@ -2063,7 +2069,7 @@ struct TVMUNuvioEventRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "nv:" + item.id)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2130,9 +2136,10 @@ private struct TVMUChannelCardFace: View {
                 .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
+                .minimumScaleFactor(0.8)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
-                .frame(height: 56)
+                .frame(height: 60)
             Spacer(minLength: 0)
             Rectangle()
                 .fill(theme.tileBorder)
@@ -2149,7 +2156,7 @@ private struct TVMUChannelCardFace: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
-        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .frame(width: cardWidth, height: 276, alignment: .topLeading)
         .background(tvMUCardBackground(focused: focused, theme: theme))
     }
 }
@@ -2204,7 +2211,7 @@ struct TVMUNuvioChannelRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVMURailHeader(title: title, count: items.count)
             if let subtitle {
                 Text(subtitle)
@@ -2228,7 +2235,7 @@ struct TVMUNuvioChannelRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "nv:" + item.id)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2254,7 +2261,7 @@ struct TVMUENChannelRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVMURailHeader(title: "🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH",
                            count: channels.count)
             Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
@@ -2271,7 +2278,7 @@ struct TVMUENChannelRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "en:" + ch.url)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2439,7 +2446,7 @@ struct TVDesignHeader: View {
             Rectangle()
                 .fill(Color.white.opacity(0.14))
                 .frame(height: 1)
-                .padding(.top, 10)
+                .padding(.top, 2)
         }
     }
 }
@@ -2512,7 +2519,7 @@ struct TVDesignCrestSlot: View {
 /// The design text tab (fresh Home drawing): plain 25 pt
 /// text, no capsule, NO red dot. Selected = white semibold +
 /// gold outline + red underline inside the face's bounds;
-/// focused = maroon fill + gold outline. Fixed height 58 and
+/// focused = maroon fill + gold outline. Fixed height 50 and
 /// a bold-width reservation, exactly the TVMUTabFace
 /// discipline (FL-360 / FL-001).
 struct TVDesignTabFace: View {
@@ -2535,7 +2542,7 @@ struct TVDesignTabFace: View {
                 .foregroundStyle(selected ? .white : theme.leagueTx)
         }
         .padding(.horizontal, 16)
-        .frame(height: 58)
+        .frame(height: 50)
         .background {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
@@ -2559,7 +2566,7 @@ struct TVDesignTabFace: View {
 
 /// The design rail header (fresh Home drawing): title 40
 /// bold + the count as a PLAIN number in a thin outlined
-/// chip (no zero-padding, no gold). Fixed height 50, the
+/// chip (no zero-padding, no gold). Fixed height 44, the
 /// family slot.
 struct TVDesignRailHeader: View {
     let title: String
@@ -2583,7 +2590,7 @@ struct TVDesignRailHeader: View {
                                       lineWidth: 1.5))
             Spacer(minLength: 0)
         }
-        .frame(height: 50)
+        .frame(height: 44)
     }
 }
 
@@ -2611,7 +2618,7 @@ struct TVDesignFooterBar: View {
     private var focused: Bool { focus.wrappedValue == focusValue }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 2) {
             Rectangle()
                 .fill(Color.white.opacity(0.12))
                 .frame(height: 1)
@@ -2633,7 +2640,7 @@ struct TVDesignFooterBar: View {
                         }
                         .foregroundStyle(focused ? .white : theme.teamTx)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 2)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
                                 .strokeBorder(focused ? theme.focusRing : .clear,
@@ -2652,8 +2659,8 @@ struct TVDesignFooterBar: View {
 }
 
 /// One fixture in the design layout: the MU card family's
-/// fixed slots (header 40 / centre 92 / names 56 / footer
-/// 24 + 8, height 272 — FL-360) with the design drawing's
+/// fixed slots (header 40 / centre 92 / names 60 / footer
+/// 24 + 8, height 276 — FL-360) with the design drawing's
 /// contents: one-line red live mark, "VS" centred for every
 /// scoreless state, initials tiles for missing crests, and
 /// the footer carrying the channel group + the match DATE
@@ -2684,7 +2691,7 @@ struct TVDesignMatchCard: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
-        .frame(width: cardWidth, height: 272, alignment: .topLeading)
+        .frame(width: cardWidth, height: 276, alignment: .topLeading)
         .background(tvMUCardBackground(focused: focused, theme: theme))
     }
 
@@ -2783,7 +2790,7 @@ struct TVDesignMatchCard: View {
         }
     }
 
-    // Names, FIXED 56: each name centred under its crest, or
+    // Names, FIXED 60: each name centred under its crest, or
     // the cleaned title centred for a non-fixture.
     private var namesRow: some View {
         Group {
@@ -2793,6 +2800,7 @@ struct TVDesignMatchCard: View {
                         .font(TVDesignFont.ui(24, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     Color.clear.frame(width: 150, height: 1)
@@ -2800,6 +2808,7 @@ struct TVDesignMatchCard: View {
                         .font(TVDesignFont.ui(24, .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                 }
@@ -2808,11 +2817,12 @@ struct TVDesignMatchCard: View {
                     .font(TVDesignFont.ui(22, .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
             }
         }
-        .frame(height: 56)
+        .frame(height: 60)
     }
 
     // Footer, FIXED 24 (+8 top padding): the representative
@@ -2842,7 +2852,7 @@ struct TVDesignMatchCard: View {
 
 /// One horizontal rail of design fixture cards: the MU
 /// fixture rail's shell (own @FocusState, keys reported
-/// upward, slot 280 FIXED) with the design header + cards.
+/// upward, slot 284 FIXED) with the design header + cards.
 struct TVDesignFixtureRail: View {
     let title: String
     let entries: [TVFixtureEntry]
@@ -2852,7 +2862,7 @@ struct TVDesignFixtureRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVDesignRailHeader(title: title, count: entries.count)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 22) {
@@ -2865,7 +2875,7 @@ struct TVDesignFixtureRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: keyFor(entry))
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2885,7 +2895,7 @@ struct TVDesignFixtureRail: View {
 
 /// One horizontal rail of DESIGN Nuvio EVENT cards: the MU
 /// rail's shell verbatim (own @FocusState, keys reported
-/// upward, slot 280 FIXED) with the DESIGN header. No design
+/// upward, slot 284 FIXED) with the DESIGN header. No design
 /// drawing exists for Nuvio cards, so the card stays the
 /// family TVMUNuvioEventCard — it repaints from the design
 /// tokens through the environment; only the header, the one
@@ -2901,7 +2911,7 @@ struct TVDesignNuvioEventRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVDesignRailHeader(title: title, count: items.count)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 22) {
@@ -2914,7 +2924,7 @@ struct TVDesignNuvioEventRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "nv:" + item.id)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2945,7 +2955,7 @@ struct TVDesignNuvioChannelRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVDesignRailHeader(title: title, count: items.count)
             if let subtitle {
                 Text(subtitle)
@@ -2969,7 +2979,7 @@ struct TVDesignNuvioChannelRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "nv:" + item.id)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -2996,7 +3006,7 @@ struct TVDesignENChannelRail: View {
     @FocusState private var focus: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             TVDesignRailHeader(title: "🌍  EN · BLV Anh — KÊNH BLV TIẾNG ANH",
                                count: channels.count)
             Text("Kênh 24/7 bình luận tiếng Anh — nguồn dự phòng khi nguồn Việt chậm hoặc chết.")
@@ -3013,7 +3023,7 @@ struct TVDesignENChannelRail: View {
                         }
                         .tvCardButton()
                         .focused($focus, equals: "en:" + ch.url)
-                        .frame(height: 280, alignment: .top)
+                        .frame(height: 284, alignment: .top)
                     }
                 }
                 .padding(.horizontal, 4)

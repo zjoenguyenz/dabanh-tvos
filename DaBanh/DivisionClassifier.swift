@@ -39,6 +39,11 @@ enum CompetitionID: String, Equatable, Sendable {
     case europaLeague = "uefa.europa"
     case conferenceLeague = "uefa.europa.conf"
     case womensChampionsLeague = "uefa.womens.champions"
+    /// 1.7.7 (item c): NBA basketball — reachable ONLY through
+    /// `init?(espnSlug:)` from the basketball fetch's own slug
+    /// table (`espnBasketballSlugs`); the FotMob/Flashscore
+    /// initialisers never produce it.
+    case nba = "nba"
 
     init?(espnSlug: String) {
         // UWCL rides its own ESPN slug family; the store's slug
@@ -127,6 +132,13 @@ enum CompetitionID: String, Equatable, Sendable {
         "fifa.worldq.uefa",
     ]
 
+    /// The ESPN BASKETBALL slugs the live-state store polls
+    /// (1.7.7, item c). Kept SEPARATE from `espnSlugs`: that
+    /// list feeds the soccer URL, so an entry here must never
+    /// join it — the basketball fetch builds the basketball
+    /// URL from this list alone.
+    static let espnBasketballSlugs: [String] = ["nba"]
+
     /// Country league rank this competition belongs to (League
     /// rawValues 1–5), nil for the European cups.
     var countryRank: Int? {
@@ -143,6 +155,12 @@ enum CompetitionID: String, Equatable, Sendable {
         // cup fixture. Rank 9 keeps isCup/isLower false and the
         // lower/top lookups nil, so filing is unchanged.
         case .serieABrazil: return 9
+        // 1.7.7 (item c): NBA has no country tab either — its
+        // fixtures file under Khác (rank 9) exactly like
+        // Brazil's. The rank must NOT be nil for the same
+        // reason: nil is what isCup tests, and an NBA fixture
+        // must never file as a European-cup fixture.
+        case .nba: return 9
         case .championsLeague, .europaLeague, .conferenceLeague,
              .womensChampionsLeague: return nil
         }
@@ -175,6 +193,7 @@ enum CompetitionID: String, Equatable, Sendable {
         case .europaLeague: return "CÚP C2 · EUROPA LEAGUE"
         case .conferenceLeague: return "CÚP C3 · CONFERENCE LEAGUE"
         case .womensChampionsLeague: return "CÚP C1 NỮ"
+        case .nba: return "NBA"
         }
     }
 
