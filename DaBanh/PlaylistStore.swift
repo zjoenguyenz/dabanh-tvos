@@ -46,6 +46,17 @@ final class PlaylistStore: ObservableObject {
     /// live. The iOS UI does not render this tab yet; the tvOS UI does.
     static let liveTabValue = -1
     private static let autoRefreshInterval: TimeInterval = 15 * 60
+    /// How long a probed URL stays fresh for the link sweep
+    /// (1.7.10): inside the window the sweep does not spend a
+    /// probe on it again. 30 min matches the mirror's own
+    /// republication cadence — a link is re-proven roughly as
+    /// often as the list itself is regenerated.
+    private static let validationFreshness: TimeInterval = 30 * 60
+    /// Delay between a playlist load and the automatic sweep
+    /// (1.7.10): the sweep is deferred off the load path, so
+    /// probing never contends with the fetch that produced
+    /// the list or with the first screens built from it.
+    private static let validationDelay: TimeInterval = 20
     /// A mirror whose Updated stamp is older than this is treated as
     /// stale even when reachable (its workflow republishes every
     /// 30 minutes when healthy).
@@ -64,6 +75,16 @@ final class PlaylistStore: ObservableObject {
     /// Persisted so a cold start opens already clean, and re-probed
     /// after every refresh so a revived link returns on its own.
     private var invalidURLs: Set<String> = []
+    /// When each URL was last probed by the sweep (1.7.10),
+    /// epoch seconds, persisted beside the invalid set. Before
+    /// 1.7.10 the sweep kept no such memory: it re-probed the
+    /// whole list after every load — the tvOS copy of the
+    /// disease DIAG-140-SMOOTH convicted on iOS 1.40.
+    private var validationStamps: [String: TimeInterval] = [:]
+    /// The pending deferred automatic sweep (1.7.10), if any;
+    /// a new schedule replaces the pending one, and the manual
+    /// "Kiểm tra link" pass cancels it outright.
+    private var validationTask: Task<Void, Never>?
     /// The mirror's EN block from the most recent successful mirror
     /// fetch (seeded from the mirror disk cache at launch). Kept
     /// separately so the EN merge below survives a mirror outage.
@@ -120,6 +141,24 @@ final class PlaylistStore: ObservableObject {
         let list = Array(invalidURLs)
         if let data = try? JSONEncoder().encode(list) {
             try? data.write(to: invalidFileURL, options: .atomic)
+        }
+    }
+
+    private var validationFileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("validation-stamps.json")
+    }
+
+    private func loadValidationStamps() {
+        guard let data = try? Data(contentsOf: validationFileURL),
+              let table = try? JSONDecoder().decode([String: TimeInterval].self, from: data)
+        else { return }
+        validationStamps = table
+    }
+
+    private func saveValidationStamps() {
+        if let data = try? JSONEncoder().encode(validationStamps) {
+            try? data.write(to: validationFileURL, options: .atomic)
         }
     }
 
@@ -191,6 +230,7 @@ final class PlaylistStore: ObservableObject {
 
     private func loadCache() {
         loadInvalidSet()
+        loadValidationStamps()
         // GitHub-first, same order as the live fetch: the mirror cache
         // is the main list (leagues + Hot + extras in one file).
         if let text = readCache(mirrorCacheFileURL) {
@@ -647,7 +687,7 @@ final class PlaylistStore: ObservableObject {
             for (i, ch) in ladder.enumerated() where !healthDead.contains(i) {
                 group.addTask {
                     let t0 = Date()
-                    let verdict = await StreamVerifier.verify(ch)
+                    let verdict = await StreamVerifier.verify(ch, oneShot: true)
                     return (i, verdict, Int(Date().timeIntervalSince(t0) * 1000))
                 }
             }
@@ -756,19 +796,86 @@ final class PlaylistStore: ObservableObject {
     /// breaking ties. (Before 1.6.0 the tier published in
     /// candidate order, so a slow head source played ahead of a
     /// fast one that had already proven itself.)
+    ///
+    /// 1.7.10 (change 5, source reputation): within a 500 ms
+    /// latency band — latencies close enough to count as
+    /// comparable — a host with a proven playback record ranks
+    /// ahead of an unknown host, and a repeatedly failing host
+    /// ranks behind. The sort keys are (band, tier, latency,
+    /// candidate order), snapshotted BEFORE sorting, so the
+    /// comparator is a total order over frozen values. With no
+    /// reputation data every tier is .average and the keys
+    /// reduce to (band, latency, order) — which orders exactly
+    /// as the pre-1.7.10 (latency, order) sort did, band being
+    /// monotonic in latency. Reputation REORDERS only: every
+    /// verified rung is still published.
+    private static let reputationBandMs = 500
+    /// The last reputation-adjustment signature logged, so an
+    /// identical outcome is not re-logged on every verdict
+    /// that lands during one resolve.
+    private static var lastReputationSignature: String?
+
     private static func verifiedSources(ladder: [Channel],
                                         verdicts: [Int: MatchVerdict],
                                         latencies: [Int: Int]) -> [ResolvedSource] {
-        ladder.enumerated().compactMap { i, _ -> (Int, ResolvedSource)? in
-            guard case .verified(let ch, let quality)? = verdicts[i] else { return nil }
-            return (i, ResolvedSource(channel: ch, quality: quality, verified: true))
+        let verified: [(Int, ResolvedSource)] = ladder.enumerated()
+            .compactMap { i, _ -> (Int, ResolvedSource)? in
+                guard case .verified(let ch, let quality)? = verdicts[i] else { return nil }
+                return (i, ResolvedSource(channel: ch, quality: quality, verified: true))
+            }
+        let rows: [(index: Int, source: ResolvedSource, latency: Int,
+                     band: Int, tier: SourceReputation.Tier)] = verified.map { pair in
+            let latency = latencies[pair.0] ?? Int.max
+            let host = URL(string: pair.1.channel.url)?.host ?? ""
+            return (index: pair.0, source: pair.1, latency: latency,
+                    band: latency / Self.reputationBandMs,
+                    tier: SourceReputation.tier(forHost: host))
         }
-        .sorted { a, b in
+        let ordered = rows.sorted { a, b in
+            if a.band != b.band { return a.band < b.band }
+            if a.tier != b.tier { return a.tier.rawValue < b.tier.rawValue }
+            if a.latency != b.latency { return a.latency < b.latency }
+            return a.index < b.index
+        }
+        logReputationAdjustment(ladder: ladder, verified: verified,
+                                latencies: latencies, ordered: ordered)
+        return ordered.map { $0.source }
+    }
+
+    /// The one DiagLog line owed when reputation actually
+    /// changed the verified order (1.7.10): the plain
+    /// no-reputation order is recomputed with the pre-1.7.10
+    /// comparator, and when the two index sequences differ,
+    /// the first rung reputation moved is named with its
+    /// record. (At the first differing position the rung now
+    /// standing there necessarily moved UP — every earlier
+    /// position holds the same rung in both orders.)
+    private static func logReputationAdjustment(
+        ladder: [Channel],
+        verified: [(Int, ResolvedSource)],
+        latencies: [Int: Int],
+        ordered: [(index: Int, source: ResolvedSource, latency: Int,
+                   band: Int, tier: SourceReputation.Tier)]
+    ) {
+        guard ordered.count > 1 else { return }
+        let plainOrder = verified.sorted { a, b in
             let la = latencies[a.0] ?? Int.max
             let lb = latencies[b.0] ?? Int.max
             return la != lb ? la < lb : a.0 < b.0
+        }.map { $0.0 }
+        let newOrder = ordered.map { $0.index }
+        guard plainOrder != newOrder else { return }
+        let signature = ladder.map { $0.url }.joined(separator: "\n")
+            + "|" + newOrder.map { String($0) }.joined(separator: ",")
+        guard signature != lastReputationSignature else { return }
+        lastReputationSignature = signature
+        for position in newOrder.indices where newOrder[position] != plainOrder[position] {
+            let host = URL(string: ladder[newOrder[position]].url)?.host ?? "?"
+            let record = SourceReputation.describe(host: host) ?? "no record"
+            DiagLog.write("resolve", "reputation: order adjusted — "
+                + "\(host) moved up (\(record))")
+            break
         }
-        .map { $0.1 }
     }
 
     /// The finished ladder: verified rungs fastest-first, then
@@ -861,19 +968,42 @@ final class PlaylistStore: ObservableObject {
     /// and hides the ones that are definitively unplayable HERE, so
     /// dead links never reach the match screens. The mirror repo runs
     /// the vantage-independent half of the same job (404s + filler).
+    ///
+    /// 1.7.10 (DIAG-140-SMOOTH tvOS audit, item 1): the sweep is
+    /// INCREMENTAL and LOGGED. Each probed URL is stamped; a URL
+    /// is due again only outside the freshness window, so a load
+    /// no longer re-probes the whole list — and the pass writes
+    /// DiagLog start/finish lines (pool, due, dead, duration)
+    /// where before it wrote none at all.
 
+    /// The automatic sweep is DEFERRED (1.7.10): it fires
+    /// ~20 s after the load that scheduled it, never on the
+    /// load path itself, and a new schedule replaces a pending
+    /// one — back-to-back loads (start + refresh) leave exactly
+    /// one pending pass, not two.
     private func scheduleValidation() {
-        Task { await validateLinks(reset: false) }
+        validationTask?.cancel()
+        validationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.validationDelay))
+            guard let self, !Task.isCancelled else { return }
+            await self.validateLinks(reset: false)
+        }
     }
 
     /// The "Kiểm tra link" button: force-fetch the newest playlist,
     /// then re-probe EVERYTHING from scratch (the hidden set is
     /// cleared first, so a link that died under a dead tunnel gets a
     /// fair second chance) and republish the match screens.
+    /// 1.7.10: the tap runs the sweep EXACTLY ONCE — refresh()
+    /// deferred its own automatic pass, and that pass is
+    /// cancelled here rather than waited out and then doubled
+    /// (the pre-1.7.10 shape ran the whole list twice per tap).
+    /// A deferred pass that already fired is waited out first;
+    /// a pass in flight is never doubled either.
     func refreshAndValidate() async {
         await refresh()
-        // refresh() schedules its own background pass; wait it out so
-        // the from-scratch pass below is the one that runs.
+        validationTask?.cancel()
+        validationTask = nil
         while validating {
             try? await Task.sleep(for: .milliseconds(200))
         }
@@ -895,20 +1025,45 @@ final class PlaylistStore: ObservableObject {
         if reset {
             invalidURLs = []
             saveInvalidSet()
+            // A from-scratch pass must also forget the stamps —
+            // otherwise every URL would read fresh and the pass
+            // would probe nothing at all.
+            validationStamps = [:]
+            saveValidationStamps()
             publishFiltered()
         }
-        let now = Date()
+        let started = Date()
+        let now = started
         var seen = Set<String>()
         var pool: [Channel] = []
         for ch in rawChannels + rawHotChannels where seen.insert(ch.url).inserted {
             if !Self.isFLV(ch.url) { pool.append(ch) }
         }
+        // Incremental (1.7.10): only DUE URLs are probed — never
+        // probed, or last probed outside the freshness window.
+        let due = pool.filter { ch in
+            guard let stamp = validationStamps[ch.url] else { return true }
+            return now.timeIntervalSince1970 - stamp > Self.validationFreshness
+        }
+        DiagLog.write("playlist", "validate: pool=\(pool.count) due=\(due.count) reset=\(reset)")
         // Live-window and always-on channels first — they are what
         // the home screen leads with; the rest follow in a second wave.
-        let liveWave = pool.filter { isLiveScope($0, now: now) }
-        let restWave = pool.filter { !isLiveScope($0, now: now) }
-        await probeWave(liveWave, now: now)
-        await probeWave(restWave, now: now)
+        let liveWave = due.filter { isLiveScope($0, now: now) }
+        let restWave = due.filter { !isLiveScope($0, now: now) }
+        let liveResult = await probeWave(liveWave, now: now)
+        let restResult = await probeWave(restWave, now: now)
+        // Stamps for URLs that left the list are pruned, so the
+        // persisted table tracks the current playlist instead of
+        // growing with every list the app has ever loaded.
+        let poolURLs = Set(pool.map { $0.url })
+        let staleStamps = validationStamps.keys.filter { !poolURLs.contains($0) }
+        if !staleStamps.isEmpty {
+            for url in staleStamps { validationStamps.removeValue(forKey: url) }
+            saveValidationStamps()
+        }
+        DiagLog.write("playlist", "validate done: probed=\(liveResult.probed + restResult.probed) "
+            + "dead=\(liveResult.dead + restResult.dead) "
+            + "in \(Int(Date().timeIntervalSince(started))) s")
     }
 
     /// "Should be serving right now": inside the live window, or a
@@ -917,8 +1072,13 @@ final class PlaylistStore: ObservableObject {
         ch.kickoff == nil || LeagueClassifier.bucket(of: ch, now: now) == 0
     }
 
-    private func probeWave(_ wave: [Channel], now: Date) async {
-        if wave.isEmpty { return }
+    /// Probes one wave and applies its verdicts to the invalid
+    /// set, exactly as before 1.7.10; the increment is that every
+    /// probed URL is STAMPED (1.7.10) — valid or invalid, a probe
+    /// happened — and the wave reports its counts for the pass's
+    /// finish line.
+    private func probeWave(_ wave: [Channel], now: Date) async -> (probed: Int, dead: Int) {
+        if wave.isEmpty { return (0, 0) }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         let session = URLSession(configuration: config)
@@ -939,8 +1099,10 @@ final class PlaylistStore: ObservableObject {
                 for await r in group { acc.append(r) }
                 return acc
             }
+            let stamp = Date().timeIntervalSince1970
             for (url, ok) in results {
                 if ok { validNow.insert(url) } else { invalidNow.insert(url) }
+                validationStamps[url] = stamp
             }
             idx += chunkSize
         }
@@ -951,6 +1113,8 @@ final class PlaylistStore: ObservableObject {
             saveInvalidSet()
             publishFiltered()
         }
+        saveValidationStamps()
+        return (validNow.count + invalidNow.count, invalidNow.count)
     }
 }
 
@@ -1008,7 +1172,9 @@ enum MatchVerdict {
     /// Refused (401/403) but no Referer was ever attached to
     /// repair against — not proof of a dead stream (the addon's
     /// keep rule), so it is presented unverified, behind every
-    /// verified rung.
+    /// verified rung. The publish path's one-shot mode (1.7.10)
+    /// also lands here: it spends no repair shot, so its
+    /// refusals are equally unproven.
     case keptBlind
     /// Network error or 5xx after the retry budget, or still
     /// unsettled at the resolve's hard cap: verification was
@@ -1038,11 +1204,25 @@ enum MatchVerdict {
 /// target's Nuvio addon store (DaBanhTV/NuvioAddon.swift)
 /// verifies its addon ladders through this same verifier —
 /// one judge for every ladder the player can receive.
+///
+/// 1.7.10 (DIAG-140-SMOOTH tvOS audit, item 2): the verifier
+/// has TWO disciplines. The full discipline above is the
+/// background judge — NuvioAddon's ladder verification keeps
+/// it unchanged. The resolve/publish path (runResolve) calls
+/// with `oneShot: true`: ONE fetch inside 3 s, no backoff
+/// retries, no Referer-repair second shot — on the path where
+/// the viewer is waiting, an inconclusive answer classifies
+/// BLIND (keptBlind / failedTransient) and the resolve gate's
+/// blind tier plus the ladder walk handle the rest, instead
+/// of one slow candidate taxing every rung behind it up to
+/// the old ≈9 s worst case.
 enum StreamVerifier {
 
     private static let maxAttempts = 3
     private static let totalBudget: TimeInterval = 9
     private static let attemptTimeout: TimeInterval = 4
+    /// The publish path's single-shot budget (1.7.10).
+    private static let publishTimeout: TimeInterval = 3
     private static let sampleCap = 32_768
     /// The user agent LinkProbe sends when an entry declares
     /// none — the verifier and the sweep speak with one voice.
@@ -1054,12 +1234,32 @@ enum StreamVerifier {
         case transient
     }
 
-    static func verify(_ channel: Channel) async -> MatchVerdict {
+    static func verify(_ channel: Channel, oneShot: Bool = false) async -> MatchVerdict {
         // Direct media files are kept blind (the addon's
         // keep-list: it verifies playlists, not files).
         let path = channel.url.split(separator: "?").first.map(String.init) ?? channel.url
         if path.lowercased().hasSuffix(".mp4") { return .keptBlind }
         guard channel.streamURL != nil else { return .dead }
+        if oneShot {
+            // Publish path (1.7.10): a single fetch inside the
+            // 3 s budget. A refusal is NOT re-tested with the
+            // repaired Referer here — unproven is not dead, so
+            // it classifies blind; a terminal status is dead on
+            // the same evidence the full path convicts on; a
+            // network failure is transient-blind.
+            switch await fetch(channel: channel, referer: channel.referrer,
+                               origin: channel.origin.isEmpty ? nil : channel.origin,
+                               timeout: publishTimeout) {
+            case .ok(let sample):
+                return judge(sample: sample, channel: channel, referer: channel.referrer)
+            case .http(let status) where status == 401 || status == 403:
+                return .keptBlind
+            case .http:
+                return .dead
+            case .transient:
+                return .failedTransient
+            }
+        }
         let deadline = Date().addingTimeInterval(totalBudget)
         var attempt = 0
         while true {
@@ -1111,16 +1311,17 @@ enum StreamVerifier {
     /// everything the checks below need lives in the head of the
     /// playlist.
     private static func fetch(channel: Channel, referer: String,
-                              origin: String?) async -> FetchOutcome {
+                              origin: String?,
+                              timeout: TimeInterval = attemptTimeout) async -> FetchOutcome {
         guard let url = URL(string: channel.url) else { return .http(status: 400) }
         var request = URLRequest(url: url)
-        request.timeoutInterval = attemptTimeout
+        request.timeoutInterval = timeout
         request.setValue(channel.userAgent.isEmpty ? defaultUA : channel.userAgent,
                          forHTTPHeaderField: "User-Agent")
         if !referer.isEmpty { request.setValue(referer, forHTTPHeaderField: "Referer") }
         if let origin { request.setValue(origin, forHTTPHeaderField: "Origin") }
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = attemptTimeout
+        config.timeoutIntervalForRequest = timeout
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
         do {
@@ -1392,6 +1593,188 @@ enum SourceHealth {
             return nil
         }
         return entry
+    }
+
+    private static func persistLocked(_ t: [String: Entry]) {
+        if let data = try? JSONEncoder().encode(t) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        }
+    }
+}
+
+// MARK: - Source reputation memory (1.7.10, owner order 2026-11-25)
+
+/// The learned per-HOST reputation: which sources are
+/// CONSISTENTLY good, remembered across launches and used
+/// when a resolve orders its verified tier. The owner's
+/// ruling: checking a source is only one part — the app must
+/// also learn and remember. Hosts are the key because they
+/// are the stable unit: a fixture's per-match URLs are
+/// tokenized and die with the match, while the host that
+/// served it serves the next one too.
+///
+/// Fed ONLY by the player's real outcomes, at the two points
+/// SourceHealth hears them: a rung reaching its first frame
+/// is a success carrying the player's own start→ready latency;
+/// a rung the surface advances off is a failure. Verifier
+/// verdicts deliberately do NOT feed this table — FL-486's
+/// lesson is that a probe-verified source can still fail the
+/// player, so reputation is learned from playback, never from
+/// probes. SourceHealth stays the short-TTL per-URL memory;
+/// this is the long per-host one.
+///
+/// The numbers: capped at 300 hosts, oldest-touched evicted
+/// first; a host idle 30 days expires AT LOAD; first-frame
+/// latency is an EMA with alpha 0.3 (the last few plays speak
+/// loudest without one lucky play rewriting the record). The
+/// classification itself lives in `tier(for:)` — GOOD /
+/// AVERAGE / BAD from the success/failure history — and the
+/// resolve's ranking combines that class with the probe
+/// latency it measures itself, so all three of the owner's
+/// measured numbers (probe latency, time-to-first-frame,
+/// success/failure) are in play.
+///
+/// Storage and serialisation mirror SourceHealth exactly
+/// (UserDefaults JSON, one NSLock, synchronous persists): the
+/// table is written from the player's synchronous callbacks.
+/// A corrupt store decodes to empty — the app starts with no
+/// reputation rather than crashing on a learned one.
+enum SourceReputation {
+
+    /// Ordering tier for one host's record — the owner's
+    /// three classes (system-wide reputation order,
+    /// 2026-11-25): consistently GOOD, AVERAGE, BAD,
+    /// classified from the host's measured play history by
+    /// `tier(for:)` below.
+    enum Tier: Int {
+        case good = 0
+        case average = 1
+        case bad = 2
+
+        /// The class name as it appears in DiagLog lines.
+        var label: String {
+            switch self {
+            case .good: return "GOOD"
+            case .average: return "AVERAGE"
+            case .bad: return "BAD"
+            }
+        }
+    }
+
+    private struct Entry: Codable {
+        var successes: Int
+        var failures: Int
+        var emaMs: Double
+        var lastSeen: TimeInterval
+    }
+
+    private static let defaultsKey = "dabanh-reputation"
+    private static let cap = 300
+    private static let idleExpiry: TimeInterval = 30 * 24 * 3600
+    private static let emaAlpha = 0.3
+
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var table: [String: Entry]?
+
+    /// Record a real playback success: the rung reached its
+    /// first frame in `latencyMs` (the player's own measure).
+    static func recordSuccess(url: String, latencyMs: Int) {
+        guard let host = URL(string: url)?.host, !host.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var t = tableLocked()
+        var entry = t[host] ?? Entry(successes: 0, failures: 0, emaMs: 0, lastSeen: 0)
+        entry.successes += 1
+        entry.emaMs = entry.emaMs <= 0
+            ? Double(latencyMs)
+            : emaAlpha * Double(latencyMs) + (1 - emaAlpha) * entry.emaMs
+        entry.lastSeen = Date().timeIntervalSince1970
+        t[host] = entry
+        evictLocked(&t)
+        table = t
+        persistLocked(t)
+    }
+
+    /// Record a real playback failure: the surface advanced
+    /// off the rung (item failure, end-of-playback error, or
+    /// the watchdog's advance — the same event SourceHealth
+    /// records as .dead for the URL).
+    static func recordFailure(url: String) {
+        guard let host = URL(string: url)?.host, !host.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var t = tableLocked()
+        var entry = t[host] ?? Entry(successes: 0, failures: 0, emaMs: 0, lastSeen: 0)
+        entry.failures += 1
+        entry.lastSeen = Date().timeIntervalSince1970
+        t[host] = entry
+        evictLocked(&t)
+        table = t
+        persistLocked(t)
+    }
+
+    /// THE classification (system-wide order, 2026-11-25):
+    /// a pure function of one host's measured record —
+    /// GOOD at ≥3 successes with successes ≥ 3× failures
+    /// (≥75 % of plays reached a first frame), BAD at ≥3
+    /// failures with failures ≥ 3× successes, AVERAGE for
+    /// everything thinner or more mixed. The resolve's
+    /// ordering and the DiagLog adjustment line both read
+    /// the class from HERE, never from a second formula.
+    private static func tier(for entry: Entry) -> Tier {
+        if entry.successes >= 3, entry.successes >= 3 * entry.failures {
+            return .good
+        }
+        if entry.failures >= 3, entry.failures >= 3 * entry.successes {
+            return .bad
+        }
+        return .average
+    }
+
+    /// The ordering tier for one host. No record is .average
+    /// — which orders exactly as no data at all.
+    static func tier(forHost host: String) -> Tier {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = tableLocked()[host] else { return .average }
+        return tier(for: entry)
+    }
+
+    /// One host's record in log shape — tier, sample counts
+    /// and the first-frame EMA — or nil when the host has
+    /// none.
+    static func describe(host: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = tableLocked()[host] else { return nil }
+        return "tier \(tier(for: entry).label) · "
+            + "\(entry.successes) ok / \(entry.failures) fail, "
+            + "first-frame ema \(Int(entry.emaMs.rounded())) ms"
+    }
+
+    // MARK: Locked internals (call ONLY with `lock` held)
+
+    private static func tableLocked() -> [String: Entry] {
+        if let table { return table }
+        var loaded: [String: Entry] = [:]
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            loaded = decoded
+        }
+        // Idle expiry is applied at load: a host untouched for
+        // 30 days starts over as unknown.
+        let now = Date().timeIntervalSince1970
+        loaded = loaded.filter { now - $0.value.lastSeen <= idleExpiry }
+        table = loaded
+        return loaded
+    }
+
+    private static func evictLocked(_ t: inout [String: Entry]) {
+        if t.count > cap {
+            let oldest = t.sorted { $0.value.lastSeen < $1.value.lastSeen }
+                .prefix(t.count - cap).map { $0.key }
+            for k in oldest { t.removeValue(forKey: k) }
+        }
     }
 
     private static func persistLocked(_ t: [String: Entry]) {

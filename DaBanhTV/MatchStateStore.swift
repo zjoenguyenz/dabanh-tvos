@@ -235,6 +235,24 @@ final class MatchStateStore: ObservableObject {
 
     @Published private(set) var states: [String: MatchState] = [:]
 
+    /// Donor index for filledFromPool (1.7.10, DIAG-140-SMOOTH
+    /// tvOS audit item 3): pairKey → every state stored under
+    /// it, rebuilt ONCE at each `states` assignment (the poll
+    /// cycle's wholesale publish and applyBoardDetail's single
+    /// write — the only two mutation sites). Before 1.7.10
+    /// every state(for:) lookup re-filtered the WHOLE states
+    /// dictionary (~600 entries) to find one fixture's handful
+    /// of donors, and a snapshot rebuild paid that ~400 times.
+    private var donorIndex: [String: [MatchState]] = [:]
+
+    private func rebuildDonorIndex() {
+        var index: [String: [MatchState]] = [:]
+        for s in states.values {
+            index[s.pairKey, default: []].append(s)
+        }
+        donorIndex = index
+    }
+
     /// Set by PlaylistStore so list views re-render when states land.
     var onChange: (() -> Void)?
 
@@ -459,6 +477,7 @@ final class MatchStateStore: ObservableObject {
               current.fotmobID == fid,
               events.count > current.events.count else { return }
         states[key] = current.withEvents(events)
+        rebuildDonorIndex()
         onChange?()
         DiagLog.write("board", "fotmob detail id=\(fid) events=\(events.count)")
     }
@@ -578,10 +597,15 @@ final class MatchStateStore: ObservableObject {
     /// is recomputed at every lookup, exactly like iOS.
     private func filledFromPool(_ winner: MatchState, fixtureKickoff: Date,
                                 fixtureDateKey: String, now: Date) -> MatchState {
-        let donors = states.values
+        // 1.7.10: the candidate set comes from the pairKey
+        // donor index (rebuilt at each publish) instead of a
+        // full-states filter — the remaining predicates and
+        // the rank sort are exactly the pre-1.7.10 ones, so
+        // the donor pool a lookup sees is unchanged; only its
+        // cost is now O(this pair's states), not O(all states).
+        let donors = (donorIndex[winner.pairKey] ?? [])
             .filter { s in
-                s.pairKey == winner.pairKey
-                    && s.storageKey != winner.storageKey
+                s.storageKey != winner.storageKey
                     && isFresh(s, now: now)
                     && (s.dateKey == fixtureDateKey
                         || (s.kickoff.map {
@@ -860,6 +884,7 @@ final class MatchStateStore: ObservableObject {
         }
         if next != states {
             states = next
+            rebuildDonorIndex()
             onChange?()
         }
         // KH-1: the cycle's own account of itself — per-layer

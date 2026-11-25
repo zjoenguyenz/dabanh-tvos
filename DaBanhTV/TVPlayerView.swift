@@ -761,6 +761,10 @@ private struct PlayerSurface: View {
         // URL — the health memory hears it from the player
         // itself, not only from the verifier.
         SourceHealth.record(url, .ok, latencyMs: ms)
+        // 1.7.10 (change 5): the same real outcome teaches the
+        // per-host reputation — a first frame reached, with the
+        // player's own start→ready time as the latency sample.
+        SourceReputation.recordSuccess(url: url, latencyMs: ms)
         DiagLog.write("player", "first-frame \(ms) ms kind=\(kind) "
             + "host=\(URL(string: url)?.host ?? "?")")
     }
@@ -773,6 +777,9 @@ private struct PlayerSurface: View {
             // resolve of this fixture demotes the URL instead
             // of re-proving it from zero.
             SourceHealth.record(currentURL, .dead)
+            // 1.7.10 (change 5): the same advance teaches the
+            // per-host reputation a failure for this rung's host.
+            SourceReputation.recordFailure(url: currentURL)
             // KH-1: player failures are a required log event —
             // host only, never the full URL (DiagLog scrubs
             // regardless; callers still log hosts, not links).
@@ -3129,7 +3136,7 @@ private struct PlayerController: UIViewControllerRepresentable {
     var interactionLocked: Bool = false
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFail: onFail, onReady: onReady)
+        Coordinator(rungURL: channel.url, onFail: onFail, onReady: onReady)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -3236,16 +3243,89 @@ private struct PlayerController: UIViewControllerRepresentable {
         // memory records it. The owner's own pause stands the
         // stall half down (timeControlStatus .paused keeps the
         // progress clock fresh).
+        //
+        // 1.7.10 (FL-486): the PRE-READY half no longer fires
+        // on the fixed wall alone — it is progress-aware (see
+        // tickLoadWatchdog below). The post-ready stall half
+        // is unchanged since 1.6.0.
+        //
+        // These three numbers are the AVERAGE base — the
+        // pre-ready deadlines for a rung whose host has no
+        // reputation record or an AVERAGE one. observe()
+        // re-sizes them per rung from the host's reputation
+        // tier (owner amendment, 2026-11-25 — see
+        // loadDeadlines(for:) below). stallTimeout also
+        // remains the post-ready stall half's window, at
+        // every tier.
         private static let loadTimeout: TimeInterval = 6
         private static let stallTimeout: TimeInterval = 10
+        /// Absolute bound on the pre-ready wait (1.7.10): a
+        /// rung whose data keeps trickling but never produces
+        /// a first frame is still abandoned at 20 s.
+        private static let loadHardCap: TimeInterval = 20
+
+        /// Pre-ready deadlines by reputation tier (owner
+        /// amendment, 2026-11-25): the class sizes the wait,
+        /// so a GOOD source is not cut early just for being
+        /// slow. GOOD earns patience on every axis. BAD keeps
+        /// the 6 s no-progress floor — FL-486's surviving
+        /// frame arrived at 5.882 s, so no tier may wait less
+        /// than that for a first byte — and keeps its full
+        /// chance while data is actually arriving; it only
+        /// loses the benefit of the doubt sooner once the
+        /// data stops (8 s stall window, 15 s cap).
+        private static func loadDeadlines(for tier: SourceReputation.Tier)
+            -> (noProgress: TimeInterval, progressStall: TimeInterval,
+                hardCap: TimeInterval) {
+            switch tier {
+            case .good:
+                return (noProgress: 12, progressStall: 15, hardCap: 30)
+            case .bad:
+                return (noProgress: loadTimeout, progressStall: 8, hardCap: 15)
+            case .average:
+                return (noProgress: loadTimeout, progressStall: stallTimeout,
+                        hardCap: loadHardCap)
+            }
+        }
         private var watchdog: Task<Void, Never>?
         private weak var player: AVPlayer?
         private var ready = false
         private var observedAt = Date()
         private var lastTime: Double = -1
         private var lastProgressAt = Date()
+        // Pre-ready loading-progress sampling (1.7.10): the
+        // high-water marks of the current item's two loading
+        // signals, the last tick either grew, and the
+        // once-only flag for the "holding" log line.
+        private var lastBufferedEnd: Double = -1
+        private var lastBytesReceived: Int64 = -1
+        private var lastLoadProgressAt: Date?
+        private var loggedHolding = false
+        // Tier-sized pre-ready wait (owner amendment,
+        // 2026-11-25): the rung's URL, wired in from
+        // PlayerController at construction; observe()
+        // snapshots its host's reputation tier and the
+        // deadline tuple that tier earns. The three limits
+        // start at the AVERAGE base (== loadTimeout /
+        // stallTimeout / loadHardCap) and observe() replaces
+        // them before the first tick can run.
+        private let rungURL: String
+        private var rungTier: SourceReputation.Tier = .average
+        private var tierNoProgress: TimeInterval = 6
+        private var tierProgressStall: TimeInterval = 10
+        private var tierHardCap: TimeInterval = 20
 
-        init(onFail: @escaping () -> Void, onReady: @escaping () -> Void) {
+        /// " (tier GOOD)" / " (tier BAD)" appended to the
+        /// pre-ready watchdog lines, so a device log proves
+        /// the tier-sized wait was applied. AVERAGE appends
+        /// nothing — its lines stay byte-identical.
+        private var tierLogSuffix: String {
+            rungTier == .average ? "" : " (tier \(rungTier.label))"
+        }
+
+        init(rungURL: String, onFail: @escaping () -> Void,
+             onReady: @escaping () -> Void) {
+            self.rungURL = rungURL
             self.onFail = onFail
             self.onReady = onReady
         }
@@ -3255,6 +3335,20 @@ private struct PlayerController: UIViewControllerRepresentable {
             observedAt = Date()
             lastProgressAt = Date()
             lastTime = -1
+            lastBufferedEnd = -1
+            lastBytesReceived = -1
+            lastLoadProgressAt = nil
+            loggedHolding = false
+            // Snapshot this rung's patience from its host's
+            // reputation, keyed exactly as the outcome
+            // records are (the host of the rung's URL). No
+            // record reads .average — the base deadlines.
+            rungTier = SourceReputation.tier(
+                forHost: URL(string: rungURL)?.host ?? "")
+            let limits = Self.loadDeadlines(for: rungTier)
+            tierNoProgress = limits.noProgress
+            tierProgressStall = limits.progressStall
+            tierHardCap = limits.hardCap
             statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 // Read the status VALUE here and hop: the KVO handler
                 // is a non-isolated context, the coordinator's state
@@ -3292,11 +3386,7 @@ private struct PlayerController: UIViewControllerRepresentable {
             guard let player else { return }
             let now = Date()
             if !ready {
-                if now.timeIntervalSince(observedAt) > Self.loadTimeout {
-                    DiagLog.write("player", "watchdog: no first frame in "
-                        + "\(Int(Self.loadTimeout)) s — advancing")
-                    fireOnce()
-                }
+                tickLoadWatchdog(player: player, now: now)
                 return
             }
             let t = player.currentTime().seconds
@@ -3317,6 +3407,78 @@ private struct PlayerController: UIViewControllerRepresentable {
                 lastProgressAt = now
             @unknown default:
                 break
+            }
+        }
+
+        /// The pre-ready half of the watchdog (1.7.10, FL-486).
+        /// The fixed 6 s wall killed rungs whose bytes were
+        /// demonstrably still arriving: the owner's log showed
+        /// both rungs of a ladder shot at exactly 6 s with no
+        /// first frame, then — on his second manual open — a
+        /// rung producing its first frame at 5,882 ms, 118 ms
+        /// under the line. The wait is now progress-aware.
+        /// Each tick samples the CURRENT item's loading
+        /// signals: the buffered end of its first loaded time
+        /// range, and the byte count of its access log's
+        /// latest event. Either signal growing — or reading
+        /// positive for the first time, which already proves
+        /// data arrived — stamps `lastLoadProgressAt`. The
+        /// rung then advances ONLY when:
+        /// - nothing ever arrived within the no-progress
+        ///   deadline (a silent server still dies fast);
+        /// - data arrived but has not grown for the
+        ///   progress-stall window;
+        /// - or the wait passes the absolute hard cap.
+        /// All three numbers are THIS RUNG's tier-sized tuple
+        /// (see loadDeadlines(for:)): the AVERAGE base is
+        /// 6 / 10 / 20, a GOOD host waits 12 / 15 / 30, a BAD
+        /// host 6 / 8 / 15. The advance line keeps the
+        /// historic prefix and now states the TRUE elapsed
+        /// seconds and whether any progress was seen; a
+        /// non-AVERAGE rung's lines also name its tier.
+        private func tickLoadWatchdog(player: AVPlayer, now: Date) {
+            var progressed = false
+            var bufferedEnd = max(lastBufferedEnd, 0)
+            if let item = player.currentItem {
+                if let range = item.loadedTimeRanges.first {
+                    let end = range.timeRangeValue.end.seconds
+                    if end.isFinite {
+                        bufferedEnd = end
+                        if end > lastBufferedEnd {
+                            if end > 0 { progressed = true }
+                            lastBufferedEnd = end
+                        }
+                    }
+                }
+                if let event = item.accessLog()?.events.last {
+                    let bytes = event.numberOfBytesReceived
+                    if bytes > lastBytesReceived {
+                        if bytes > 0 { progressed = true }
+                        lastBytesReceived = bytes
+                    }
+                }
+            }
+            if progressed { lastLoadProgressAt = now }
+            let elapsed = now.timeIntervalSince(observedAt)
+            if let lastProgress = lastLoadProgressAt {
+                if elapsed > tierNoProgress, !loggedHolding {
+                    loggedHolding = true
+                    DiagLog.write("player", "watchdog: first frame pending — data arriving "
+                        + "(buffered \(String(format: "%.1f", bufferedEnd)) s), holding"
+                        + tierLogSuffix)
+                }
+                if now.timeIntervalSince(lastProgress) > tierProgressStall
+                    || elapsed > tierHardCap {
+                    DiagLog.write("player", "watchdog: no first frame in "
+                        + "\(Int(elapsed)) s — advancing (progress: yes)"
+                        + tierLogSuffix)
+                    fireOnce()
+                }
+            } else if elapsed > tierNoProgress {
+                DiagLog.write("player", "watchdog: no first frame in "
+                    + "\(Int(elapsed)) s — advancing (progress: no)"
+                    + tierLogSuffix)
+                fireOnce()
             }
         }
 
