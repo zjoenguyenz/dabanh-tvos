@@ -3451,7 +3451,7 @@ private struct PlayerController: UIViewControllerRepresentable {
                     }
                 }
                 if let event = item.accessLog()?.events.last {
-                    let bytes = event.numberOfBytesReceived
+                    let bytes = event.numberOfBytesTransferred
                     if bytes > lastBytesReceived {
                         if bytes > 0 { progressed = true }
                         lastBytesReceived = bytes
